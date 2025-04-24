@@ -5,9 +5,11 @@ version = "0.1.0"
 edition = "2024"
 description = "To power the rust-quantum project, this library provides a robust AltMat type for a single qubit, specifically optimized for the intensive complex number multiplications required for quantum gate applications and tensor product operations."
 license = "MIT OR Apache-2.0"
-
+repository = "https://github.com/enjuichang123/cpx-mat2by2.git"
+documentation = "https://docs.rs/cpx-mat2by2/latest/cpx-mat2by2/"
 readme = "README.md"
 keywords = ['complex-matrix']
+categories = ["data-structures", "science"]
 
 [dependencies]
-cpx-coords = { path = "../cpx-coords"}
+cpx-coords = "0.1.0"
