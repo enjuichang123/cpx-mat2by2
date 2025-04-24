@@ -1,0 +1,9 @@
+/target/         # Ignore build artifacts (compiled libraries, executables, etc.)
+*.rs.bk          # Ignore backup files created by some editors
+*.swp            # Ignore swap files created by Vim
+*.swo            # Ignore swap files created by Vim
+.DS_Store        # Ignore macOS Finder metadata files
+# RustRover/IntelliJ IDEA
+.idea/           # Ignore RustRover/IntelliJ IDEA project settings
+*.iml            # Ignore IntelliJ IDEA module files
+Cargo.lock       # Optional: only for libraries, not binaries
