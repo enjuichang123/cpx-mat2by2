@@ -3,7 +3,7 @@
 //! It leverages the `cpx-coords` crate for complex number arithmetic.
 
 use core::hash::{Hash, Hasher};
-use core::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
+use core::ops::{Add, AddAssign, Mul, Neg, Sub, SubAssign};
 use cpx_coords::*; // This line brings Cpx into the main library scope
 
 /// Represents the ket state \ket{0}.
@@ -192,7 +192,7 @@ impl State {
         }
     }
     /// Normalize the state to a standard representation.
-    fn normalize(&self) -> Self {
+    pub fn normalize(&self) -> Self {
         let state = self.regularize();
         match state {
             Self::Null => Self::Null,
@@ -201,7 +201,7 @@ impl State {
         }
     }
     /// Get c0 from a state.
-    fn c0(&self) -> Cpx {
+    pub fn c0(&self) -> Cpx {
         let state = self.regularize();
         match state {
             Self::Null => ZERO,
@@ -210,7 +210,7 @@ impl State {
         }
     }
     /// Get c1 from a state.
-    fn c1(&self) -> Cpx {
+    pub fn c1(&self) -> Cpx {
         let state = self.regularize();
         match state {
             Self::Null => ZERO,
@@ -219,7 +219,7 @@ impl State {
         }
     }
     /// Get phase from a state.
-    fn phase(&self) -> Cpx {
+    pub fn phase(&self) -> Cpx {
         let state = self.regularize();
         match state {
             Self::Null => ZERO,
@@ -228,7 +228,7 @@ impl State {
         }
     }
     /// Apply a dagger operation on a state.
-    fn dag(&self) -> Self {
+    pub fn dag(&self) -> Self {
         let state = self.regularize();
         match state {
             Self::Null => Self::Null,
@@ -245,7 +245,7 @@ impl State {
         }
     }
     /// Transfer a state to the orthogonal one.
-    fn orthogonal(&self) -> Self {
+    pub fn orthogonal(&self) -> Self {
         let state = self.regularize();
         match state {
             Self::Null => Self::Null,
@@ -264,7 +264,7 @@ impl State {
         }
     }
     /// Inner product a bra state with a ket state to get a complex number.
-    fn inner(&self, &other: &State) -> Cpx {
+    pub fn inner(&self, &other: &State) -> Cpx {
         match (self, other) {
             (Self::Null, _) | (_, Self::Null) => ZERO,
             (
@@ -282,7 +282,7 @@ impl State {
         }
     }
     /// Outer product a ket state with a bra state to get a rank-1 complex 2-by-2 matrix.
-    fn outer(&self, &other: &State) -> Rank1 {
+    pub fn outer(&self, &other: &State) -> Rank1 {
         match (self, other) {
             (Self::Ket { .. }, Self::Bra { .. }) => {
                 let self_ket = self.regularize();
@@ -300,7 +300,7 @@ impl State {
         }
     }
     /// Construct the corresponding projector from an input state.
-    fn projector(&self) -> Projector {
+    pub fn projector(&self) -> Projector {
         let normalized = self.normalize();
         match normalized {
             Self::Null => panic!("No corresponding projector for a null state."),
@@ -315,7 +315,7 @@ impl State {
         }
     }
     /// Construct the corresponding not-projector from an input state.
-    fn projector_not(&self) -> Projector {
+    pub fn projector_not(&self) -> Projector {
         let normalized = self.normalize();
         match normalized {
             Self::Null => panic!("No corresponding projector for a null state."),
@@ -338,7 +338,7 @@ impl State {
 }
 impl Projector {
     /// Regularize the projector to a standard representation.
-    fn regularize(&self) -> Self {
+    pub fn regularize(&self) -> Self {
         let mut new_ket = self.ket.regularize();
         let new_scalar = self.scalar * new_ket.phase();
         new_ket = new_ket.normalize();
@@ -348,14 +348,14 @@ impl Projector {
         }
     }
     /// Normalize the projector to a standard representation.
-    fn normalize(&self) -> Self {
+    pub fn normalize(&self) -> Self {
         Projector {
             scalar: ONE,
             ket: self.ket.normalize(),
         }
     }
     /// Convert the projector into a [[Cpx; 2]; 2] form.
-    fn to_mat(self) -> [[Cpx; 2]; 2] {
+    pub fn to_mat(self) -> [[Cpx; 2]; 2] {
         let regularized = self.regularize();
         let r0 = regularized.ket.c0();
         let r1 = regularized.ket.c1();
@@ -365,7 +365,7 @@ impl Projector {
         [[s * r0 * c0, s * r0 * c1], [s * r1 * c0, s * r1 * c1]]
     }
     /// Take trace of this projector.
-    fn tr(&self) -> Cpx {
+    pub fn tr(&self) -> Cpx {
         let regularized = self.regularize();
         let r0 = regularized.ket.c0();
         let r1 = regularized.ket.c1();
@@ -375,14 +375,14 @@ impl Projector {
         s * (r0 * c0 + r1 * c1)
     }
     /// Take dag of this projector.
-    fn dag(&self) -> Self {
+    pub fn dag(&self) -> Self {
         Projector {
             scalar: self.scalar.conj(),
             ket: self.ket,
         }
     }
     /// Convert this projector into its complement.
-    fn not(&self) -> Self {
+    pub fn not(&self) -> Self {
         let regularized = self.regularize();
         Projector {
             scalar: regularized.scalar,
@@ -390,13 +390,13 @@ impl Projector {
         }
     }
     /// Check if this is indeed a null matrix.
-    fn is_zero(&self) -> bool {
+    pub fn is_zero(&self) -> bool {
         self.regularize().scalar.is_zero()
     }
 }
 impl Nilpotent {
     /// Regularize the nilpotent matrix to a standard representation.
-    fn regularize(&self) -> Self {
+    pub fn regularize(&self) -> Self {
         let mut new_ket = self.ket.regularize();
         let new_scalar = self.scalar * new_ket.phase();
         new_ket = new_ket.normalize();
@@ -406,14 +406,14 @@ impl Nilpotent {
         }
     }
     /// Normalize the nilpotent matrix to a standard representation.
-    fn normalize(&self) -> Self {
+    pub fn normalize(&self) -> Self {
         Nilpotent {
             scalar: ONE,
             ket: self.ket.normalize(),
         }
     }
     /// Convert the nilpotent matrix into a [[Cpx; 2]; 2] form.
-    fn to_mat(self) -> [[Cpx; 2]; 2] {
+    pub fn to_mat(self) -> [[Cpx; 2]; 2] {
         let regularized = self.regularize();
         let r0 = regularized.ket.c0();
         let r1 = regularized.ket.c1();
@@ -423,7 +423,7 @@ impl Nilpotent {
         [[s * r0 * c0, s * r0 * c1], [s * r1 * c0, s * r1 * c1]]
     }
     /// Take trace of this nilpotent matrix.
-    fn tr(&self) -> Cpx {
+    pub fn tr(&self) -> Cpx {
         let regularized = self.regularize();
         let r0 = regularized.ket.c0();
         let r1 = regularized.ket.c1();
@@ -433,7 +433,7 @@ impl Nilpotent {
         s * (r0 * c0 + r1 * c1)
     }
     /// Take dag of this nilpotent matrix.
-    fn dag(&self) -> Self {
+    pub fn dag(&self) -> Self {
         let regularized = self.regularize();
         let new_ket = State::Ket {
             c0: regularized.ket.c1(),
@@ -447,7 +447,7 @@ impl Nilpotent {
         }
     }
     /// Convert this nilpotent matrix into its complement.
-    fn not(&self) -> Self {
+    pub fn not(&self) -> Self {
         let regularized = self.regularize();
         Nilpotent {
             scalar: regularized.scalar,
@@ -455,13 +455,13 @@ impl Nilpotent {
         }
     }
     /// Check if this matrix is indeed null.
-    fn is_zero(&self) -> bool {
+    pub fn is_zero(&self) -> bool {
         self.regularize().scalar.is_zero()
     }
 }
 impl Rank1 {
     /// Regularize the rank-1 matrix to a standard representation.
-    fn regularize(&self) -> Self {
+    pub fn regularize(&self) -> Self {
         let mut new_ket = self.ket.regularize();
         let mut new_bra = self.bra.regularize();
         let new_scalar = self.scalar * new_ket.phase() * new_bra.phase();
@@ -474,7 +474,7 @@ impl Rank1 {
         }
     }
     /// Normalize the rank-1 matrix to a standard representation.
-    fn normalize(&self) -> Self {
+    pub fn normalize(&self) -> Self {
         Rank1 {
             scalar: ONE,
             ket: self.ket.normalize(),
@@ -482,7 +482,7 @@ impl Rank1 {
         }
     }
     /// Convert the rank-1 matrix into a [[Cpx; 2]; 2] form.
-    fn to_mat(self) -> [[Cpx; 2]; 2] {
+    pub fn to_mat(self) -> [[Cpx; 2]; 2] {
         let regularized = self.regularize();
         let r0 = regularized.ket.c0();
         let r1 = regularized.ket.c1();
@@ -492,7 +492,7 @@ impl Rank1 {
         [[s * r0 * c0, s * r0 * c1], [s * r1 * c0, s * r1 * c1]]
     }
     /// Take trace of this matrix.
-    fn tr(&self) -> Cpx {
+    pub fn tr(&self) -> Cpx {
         let regularized = self.regularize();
         let r0 = regularized.ket.c0();
         let r1 = regularized.ket.c1();
@@ -502,7 +502,7 @@ impl Rank1 {
         s * (r0 * c0 + r1 * c1)
     }
     /// Take dag of this matrix.
-    fn dag(&self) -> Self {
+    pub fn dag(&self) -> Self {
         let regularized = self.regularize();
         Rank1 {
             scalar: regularized.scalar.conj(),
@@ -511,7 +511,7 @@ impl Rank1 {
         }
     }
     /// Convert this matrix into its complement.
-    fn not(&self) -> Self {
+    pub fn not(&self) -> Self {
         let regularized = self.regularize();
         Rank1 {
             scalar: regularized.scalar,
@@ -520,13 +520,13 @@ impl Rank1 {
         }
     }
     /// Check if this matrix is indeed null.
-    fn is_zero(&self) -> bool {
+    pub fn is_zero(&self) -> bool {
         self.regularize().scalar.is_zero()
     }
 }
 impl Pauli {
     /// Convert this Pauli matrix into a [[Cpx; 2]; 2] form.
-    fn to_mat(self) -> [[Cpx; 2]; 2] {
+    pub fn to_mat(self) -> [[Cpx; 2]; 2] {
         match &self.idx {
             0 => [[self.scalar, ZERO], [ZERO, self.scalar]],
             1 => [[ZERO, self.scalar], [self.scalar, ZERO]],
@@ -538,7 +538,7 @@ impl Pauli {
 }
 impl Rank2SVD {
     /// Regularize the rank-2 matrix to a standard representation.
-    fn regularize(&self) -> Self {
+    pub fn regularize(&self) -> Self {
         match (self.u1, self.u2, self.v1, self.v2) {
             (State::Ket { .. }, State::Ket { .. }, State::Bra { .. }, State::Bra { .. }) => {
                 let mut new_u1 = self.u1.regularize();
@@ -598,12 +598,12 @@ impl Rank2SVD {
         }
     }
     /// Get the det of this matrix.
-    fn det(&self) -> Cpx {
+    pub fn det(&self) -> Cpx {
         let s = self.regularize();
         s.sigma1 * s.sigma2
     }
     /// Convert this matrix into a [[Cpx; 2]; 2] form.
-    fn to_mat(self) -> [[Cpx; 2]; 2] {
+    pub fn to_mat(self) -> [[Cpx; 2]; 2] {
         let m1 = Rank1 {
             scalar: self.sigma1,
             ket: self.u1,
@@ -622,17 +622,17 @@ impl Rank2SVD {
         ]
     }
     /// Take trace of this matrix.
-    fn tr(&self) -> Cpx {
+    pub fn tr(&self) -> Cpx {
         let mat = &self.to_mat();
         mat[0][0] + mat[1][1]
     }
     /// Check if this matrix is indeed null.
-    fn is_zero(&self) -> bool {
+    pub fn is_zero(&self) -> bool {
         let s = self.regularize();
         s.sigma1.is_zero() && s.sigma2.is_zero()
     }
     /// Get the exact rank of this matrix.
-    fn rank(&self) -> u8 {
+    pub fn rank(&self) -> u8 {
         if self.is_zero() {
             0
         } else if self.det().is_zero() {
@@ -642,27 +642,27 @@ impl Rank2SVD {
         }
     }
     /// Get Pauli-I component from this matrix.
-    fn get_i(&self) -> Cpx {
+    pub fn get_i(&self) -> Cpx {
         let mat = &self.to_mat();
         (mat[0][0] + mat[1][1]) / 2.0
     }
     /// Get Pauli-X component from this matrix.
-    fn get_x(&self) -> Cpx {
+    pub fn get_x(&self) -> Cpx {
         let mat = &self.to_mat();
         (mat[0][1] + mat[1][0]) / 2.0
     }
     /// Get Pauli-Y component from this matrix.
-    fn get_y(&self) -> Cpx {
+    pub fn get_y(&self) -> Cpx {
         let mat = &self.to_mat();
         (mat[0][1] - mat[1][0]) / 2.0 * J
     }
     /// Get Pauli-Z component from this matrix.
-    fn get_z(&self) -> Cpx {
+    pub fn get_z(&self) -> Cpx {
         let mat = &self.to_mat();
         (mat[0][0] - mat[1][1]) / 2.0
     }
     /// Check if this matrix is Pauli.
-    fn is_pauli(&self) -> bool {
+    pub fn is_pauli(&self) -> bool {
         let b0 = !self.get_i().is_zero();
         let b1 = !self.get_x().is_zero();
         let b2 = !self.get_y().is_zero();
@@ -673,7 +673,7 @@ impl Rank2SVD {
 }
 impl AltMat {
     /// Regularize the classified complex 2-by-2 matrix to a standard representation.
-    fn regularize(&self) -> Self {
+    pub fn regularize(&self) -> Self {
         match self {
             Self::Rank0 => Self::Rank0,
             Self::Projector { projector } => Self::Projector {
@@ -938,7 +938,7 @@ impl AltMat {
         }
     }
     /// Get the scalar of this matrix.
-    fn scalar(&self) -> Cpx {
+    pub fn scalar(&self) -> Cpx {
         match self {
             Self::Rank0 => ZERO,
             Self::Projector { projector } => projector.regularize().scalar,
@@ -949,7 +949,7 @@ impl AltMat {
         }
     }
     /// Normalize this matrix.
-    fn normalize(&self) -> Self {
+    pub fn normalize(&self) -> Self {
         match self.scalar().inv() {
             Ok(inv_scalar) => (*self * inv_scalar).regularize(),
             Err(_) => {
@@ -959,7 +959,7 @@ impl AltMat {
         }
     }
     /// Check is this matrix is indeed an identity matrix up to a scalar.
-    fn is_id(&self) -> bool {
+    pub fn is_id(&self) -> bool {
         let normalized = self.normalize();
         match normalized {
             Self::Pauli { pauli } => pauli.idx == 0,

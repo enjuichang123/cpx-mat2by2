@@ -25,7 +25,7 @@ Add `cpx-mat2by2` as a dependency to your `Cargo.toml` file:
 
 ```toml
 [dependencies]
-cpx-mat2by2 = "0.1.0" # Replace with the latest version
+cpx-mat2by2 = "0.1.1" # Replace with the latest version
 ```
 
 ## License
@@ -41,5 +41,3 @@ at your option.
 ### Contributions
 
 Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in this project by you shall be licensed as above, without any additional terms or conditions.
-
-# cpx-mat2by2
