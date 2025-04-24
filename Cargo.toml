@@ -1,7 +1,7 @@
 [package]
 authors = ["En-Jui Chang"]
 name = "cpx-mat2by2"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "To power the rust-quantum project, this library provides a robust AltMat type for a single qubit, specifically optimized for the intensive complex number multiplications required for quantum gate applications and tensor product operations."
 license = "MIT OR Apache-2.0"
@@ -12,4 +12,4 @@ keywords = ['complex-matrix']
 categories = ["data-structures", "science"]
 
 [dependencies]
-cpx-coords = "0.1.0"
+cpx-coords = "0.1.1"
