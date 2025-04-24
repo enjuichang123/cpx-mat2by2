@@ -58,55 +58,55 @@ pub enum State {
 #[derive(Debug, Clone, Copy)]
 pub struct Projector {
     /// Represents the weight or scale of the projector.
-    scalar: Cpx,
+    pub scalar: Cpx,
     /// Represents the projector by a given normalized ket state.
-    ket: State,
+    pub ket: State,
 }
 
 /// Struct representing the nilpotentent matrix for a certain state.
 #[derive(Debug, Clone, Copy)]
 pub struct Nilpotent {
     /// Represents the weight or scale of the nilpotent matrix.
-    scalar: Cpx,
+    pub scalar: Cpx,
     /// Represents the nilpotent matrix by a given normalized ket state.
-    ket: State,
+    pub ket: State,
 }
 
 /// Struct representing a rank-1 matrix. rank-1 = scalar * (ket outer_product bra).
 #[derive(Debug, Clone, Copy)]
 pub struct Rank1 {
     /// Represents the weight or scale of the rank-1 matrix that is neither a projector nor a nilpotent matrix.
-    scalar: Cpx,
+    pub scalar: Cpx,
     /// Represents the ket part of this rank-1 matrix.
-    ket: State,
+    pub ket: State,
     /// Represents the bra part of this rank-1 matrix.
-    bra: State,
+    pub bra: State,
 }
 
 /// Struct representing a rank-2 Pauli matrix.
 #[derive(Debug, Clone, Copy)]
 pub struct Pauli {
     /// idx = 0, 1, 2, 3 represents I, X, Y, Z, respectively. Other values of idx should not happen.
-    idx: u8,
+    pub idx: u8,
     /// The scaling of this given Pauli matrix.
-    scalar: Cpx,
+    pub scalar: Cpx,
 }
 
 /// Struct representing a rank-2 matrix by singular value decomposition.
 #[derive(Debug, Clone, Copy)]
 pub struct Rank2SVD {
     /// First singular value
-    sigma1: Cpx,
+    pub sigma1: Cpx,
     /// Second singular value
-    sigma2: Cpx,
+    pub sigma2: Cpx,
     /// First left singular vector (ket)
-    u1: State,
+    pub u1: State,
     /// Second left singular vector (ket)
-    u2: State,
+    pub u2: State,
     /// First right singular vector (bra)
-    v1: State,
+    pub v1: State,
     /// Second right singular vector (bra)
-    v2: State,
+    pub v2: State,
 }
 
 /// Enum representing the classified complex 2-by-2 matrix.
