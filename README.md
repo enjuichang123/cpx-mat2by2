@@ -1,21 +1,8 @@
 # cpx-mat2by2
 
-To power the rust-quantum project, this library provides a robust `AltMat` type for a single qubit, specifically optimized for the intensive complex number multiplications required for quantum gate applications and tensor product operations.
+cpx-mat2by2 is a Rust library for representing and manipulating quantum states and operators in 2-dimensional Hilbert space (i.e., single qubits). It is designed to work seamlessly with the cpx-coords crate for complex number arithmetic in multiple coordinate systems.
 
-## Key Features
-
-* **`AltMat` Type:** A versatile enum that can represent various types of 2x2 complex matrices relevant to quantum computing:
-    * Rank-0 (Zero matrix)
-    * Rank-1 Projectors
-    * Rank-1 Nilpotent matrices
-    * General Rank-1 matrices
-    * Pauli matrices (I, X, Y, Z) with complex scaling
-    * General Rank-2 matrices (via Singular Value Decomposition)
-* **Optimized for Quantum Operations:** Designed with the performance requirements of quantum gate applications in mind, focusing on efficient complex number multiplication.
-* **Integration with `cpx-coords`:** Leverages the `cpx-coords` crate for robust and accurate complex number arithmetic.
-* **Core Quantum Concepts:** Provides structures and methods for representing quantum states (`State`), projectors, and related linear algebra concepts.
-* **Essential Matrix Operations:** Includes methods for regularization, normalization, matrix conversion, trace calculation, and more.
-* **Hashing:** Implements the `Hash` trait for all core types, enabling their use in data structures like hash maps and sets.
+This crate is part of the broader rust-quantum project, focused on efficient numerical quantum computation.
 
 ## Usage
 
