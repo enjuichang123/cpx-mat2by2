@@ -12,4 +12,4 @@ keywords = ['complex-matrix']
 categories = ["data-structures", "science"]
 
 [dependencies]
-cpx-coords = "0.1.3"
+cpx-coords = "0.1.4"

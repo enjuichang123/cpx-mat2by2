@@ -2,3352 +2,2103 @@
 //! quantum states and operators in a 2-dimensional Hilbert space (qubit).
 //! It leverages the `cpx-coords` crate for complex number arithmetic.
 
-use core::hash::{Hash, Hasher};
-use core::ops::{Add, AddAssign, Mul, Neg, Sub, SubAssign};
+use crate::BraKet::{Bra, Ket};
+use crate::ProNil::{Nilpotent, Projector};
+use core::cmp::{max, min};
+use core::hash::Hash;
+use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
+use cpx_coords::FloatExt;
 use cpx_coords::*;
+use std::collections::BTreeMap;
 
-/// Represents the ket state \ket{0}.
-pub const KET_Z0: State = State::Ket {
-    c0: ONE,
-    c1: ZERO,
-    phase: ONE,
-};
-/// Represents the ket state \ket{1}.
-pub const KET_Z1: State = State::Ket {
-    c0: ZERO,
-    c1: ONE,
-    phase: ONE,
-};
-/// Represents the ket state \ket{+}.
-pub const KET_X0: State = State::Ket {
-    c0: INV_SQRT_2,
-    c1: INV_SQRT_2,
-    phase: ONE,
-};
-/// Represents the ket state \ket{-}.
-pub const KET_X1: State = State::Ket {
-    c0: INV_SQRT_2,
-    c1: NEG_INV_SQRT_2,
-    phase: ONE,
-};
-/// Represents the ket state \ket{+Y}.
-pub const KET_Y0: State = State::Ket {
-    c0: INV_SQRT_2,
-    c1: J_INV_SQRT_2,
-    phase: ONE,
-};
-/// Represents the ket state \ket{-Y}.
-pub const KET_Y1: State = State::Ket {
-    c0: INV_SQRT_2,
-    c1: NEG_J_INV_SQRT_2,
-    phase: ONE,
-};
-
-/// Enum representing the state of a qubit.
-#[derive(Debug, Clone, Copy)]
-pub enum State {
-    /// Represents the Null state that should be avoided.
-    Null,
-    /// Represents a ket state.
-    Ket { c0: Cpx, c1: Cpx, phase: Cpx },
-    /// Represents a bra state.
-    Bra { c0: Cpx, c1: Cpx, phase: Cpx },
+/// Enum representing the side of a state vector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BraKet {
+    /// A bra vector ⟨ψ|.
+    Bra,
+    /// A ket vector |ψ⟩.
+    Ket,
 }
 
-/// Represents a (possibly weighted) projector operator derived from a normalized ket state.
-#[derive(Debug, Clone, Copy)]
-pub struct Projector {
-    /// Represents the weight or scale of the projector.
-    pub scalar: Cpx,
-    /// Represents the projector by a given normalized ket state.
-    pub ket: State,
+/// Canonical normalized amplitudes representing a single-qubit pure state.
+///
+/// This form enforces uniqueness for hashing and equality by fixing the global phase:
+/// - `c0 ∈ ℝ≥0` (real and non-negative)
+/// - `|c0|² + |c1|² = 1` (normalization)
+/// - If `c0 == 0`, then `c1 == Cpx::One {}` (canonical phase)
+///
+/// This ensures a normalized state vector with a unique, phase-fixed representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NormPair<T: FloatExt + Hash> {
+    /// Real, non-negative amplitude of the |0⟩ basis state.
+    pub c0: T,
+    /// Complex amplitude of the |1⟩ basis state.
+    pub c1: Cpx<T>,
 }
 
-/// Represents a (possibly weighted) nilpotent operator derived from a normalized ket state.
-#[derive(Debug, Clone, Copy)]
-pub struct Nilpotent {
-    /// Represents the weight or scale of the nilpotent matrix.
-    pub scalar: Cpx,
-    /// Represents the nilpotent matrix by a given normalized ket state.
-    pub ket: State,
+/// A normalized single-qubit state in canonical form with orientation.
+///
+/// Wraps a `NormPair<T>` with a `BraKet` tag to indicate whether the state is a ket or bra.
+/// The state is normalized and represented uniquely up to global phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NormQubit<T: FloatExt + Hash> {
+    /// Indicates if the state is a ket or bra.
+    pub bra_ket: BraKet,
+    /// Canonical normalized amplitudes for the qubit state.
+    pub norm_pair: NormPair<T>,
 }
 
-/// A rank-1 matrix defined as M=scalar⋅∣ket⟩⟨bra∣M=scalar⋅∣ket⟩⟨bra∣, where the matrix is the product of a scalar, a ket vector, and a bra vector.
-#[derive(Debug, Clone, Copy)]
-pub struct Rank1 {
-    /// Represents the weight or scale of the rank-1 matrix that is neither a projector nor a nilpotent matrix.
-    pub scalar: Cpx,
-    /// Represents the ket part of this rank-1 matrix.
-    pub ket: State,
-    /// Represents the bra part of this rank-1 matrix.
-    pub bra: State,
+/// A mixed single-qubit state formed by a probabilistic mixture of a normalized state and its orthogonal complement.
+///
+/// The state represents the mixture:
+/// `ρ = prob × |ψ⟩⟨ψ| + (1 - prob) × |ψ⊥⟩⟨ψ⊥|`
+///
+/// - `prob ∈ [0.5, 1.0]` is the probability weight on the primary state.
+/// - `norm_pair` defines the normalized pure state |ψ⟩ in canonical form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MixPair<T: FloatExt + Hash> {
+    /// Probability assigned to the pure state |ψ⟩ (must satisfy 0.5 ≤ prob ≤ 1.0).
+    pub prob: T,
+    /// Canonical normalized amplitudes defining the pure state |ψ⟩.
+    pub norm_pair: NormPair<T>,
 }
 
-/// Struct representing a rank-2 Pauli matrix.
-#[derive(Debug, Clone, Copy)]
-pub struct Pauli {
-    /// idx values map to: 0 = I, 1 = X, 2 = Y, 3 = Z. Values outside this range are invalid.
-    pub idx: u8,
-    /// The scaling of this given Pauli matrix.
-    pub scalar: Cpx,
+/// A mixed single-qubit state with bra/ket orientation.
+///
+/// Wraps a `MixPair<T>` along with a `BraKet` tag to indicate state orientation of the `MixPair<T>`.
+/// Represents a probabilistic mixture of a normalized qubit and its orthogonal complement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MixQubit<T: FloatExt + Hash> {
+    /// Indicates if the `MixPair<T>` is in a ket or bra representation.
+    pub bra_ket: BraKet,
+    /// The probabilistic mixture of a pure state and its orthogonal complement.
+    pub mix_pair: MixPair<T>,
 }
 
-/// Represents a full-rank 2×2 matrix using its singular value decomposition.
-#[derive(Debug, Clone, Copy)]
-pub struct Rank2SVD {
-    /// First singular value (scaling factor for the first singular vector pair)
-    pub sigma1: Cpx,
-    /// Second singular value (scaling factor for the second singular vector pair)
-    pub sigma2: Cpx,
-    /// First left singular vector (ket)
-    pub u1: State,
-    /// Second left singular vector (ket)
-    pub u2: State,
-    /// First right singular vector (bra)
-    pub v1: State,
-    /// Second right singular vector (bra)
-    pub v2: State,
+/// A separable multi-qubit product state defined over an index interval.
+///
+/// The state is interpreted as a tensor product of individual qubit states over a specified
+/// inclusive `interval`. Each mapped entry provides a qubit's canonical normalized state.
+/// Missing indices are filled in using the default `padding` value.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct IdxToNorm<T: FloatExt + Hash> {
+    /// Inclusive interval of qubit indices this product state spans: [start, end].
+    pub interval: (usize, usize),
+    /// Default qubit state used for indices in the interval not explicitly mapped.
+    pub padding: NormPair<T>,
+    /// Mapping from selected qubit indices to the normalized single-qubit states.
+    pub idx_to_norm: BTreeMap<usize, NormPair<T>>,
 }
 
-/// Enum representing the classified complex 2-by-2 matrix.
-#[derive(Debug, Clone, Copy)]
-pub enum AltMat {
-    /// Represents a rank-0 null matrix.
-    Rank0,
-    /// Represents a rank-1 projector matrix.
-    Projector { projector: Projector },
-    /// Represents a rank-1 nilpotent matrix.
-    Nilpotent { nilpotent: Nilpotent },
-    /// Represents a more general rank-1 matrix other than a projector or a nilpotent matrix.
-    Rank1 { rank1: Rank1 },
-    /// Represents a rank-2 Pauli matrix.
-    Pauli { pauli: Pauli },
-    /// Represents a more general rank-2 matrix other than a Pauli matrix.
-    Rank2SVD { rank2: Rank2SVD },
+/// A separable multi-qubit product state with bra/ket orientation.
+///
+/// Encapsulates a product of single-qubit states using a canonical index-to-state mapping (`IdxToNorm<T>`),
+/// along with a `BraKet` tag indicating whether the state is a ket or bra.
+/// Assumes qubits are independent and ordered by index.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SepQubits<T: FloatExt + Hash> {
+    /// Indicates if the full state is a ket or bra.
+    pub bra_ket: BraKet,
+    /// Mapping from indices to single-qubit normalized states, with padding.
+    pub idx_to_norm: IdxToNorm<T>,
 }
 
-impl State {
-    /// Constructs a new Ket state. Returns `State::Null` if `phase == 0` or both `c0` and `c1` are zero.
-    pub fn new_ket(c0: Cpx, c1: Cpx, phase: Cpx) -> Self {
-        if phase.is_zero() || (c0.is_zero() && c1.is_zero()) {
-            State::Null
-        } else {
-            State::Ket { c0, c1, phase }
-        }
-    }
+/// A separable multi-qubit mixed state, where each qubit is independently in a mixed state.
+///
+/// Each qubit is represented by a `MixPair<T>`, describing a probabilistic mixture of a normalized
+/// pure state and its orthogonal complement. The `idx_to_mix` map assigns such states to selected
+/// qubit indices, while `padding` supplies a default value for indices not explicitly mapped.
+///
+/// Assumptions:
+/// - No entanglement between qubits (fully separable state).
+/// - Local mixing occurs independently at each qubit site.
+/// - The state is defined over the inclusive `interval` of indices, with canonical ordering.
+/// - The `bra_ket` field indicates whether this is a bra or ket state vector.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct IdxToMixQubits<T: FloatExt + Hash> {
+    /// Indicates if the overall `MixPair<T>`s are in a ket or bra representation.
+    pub bra_ket: BraKet,
+    /// Inclusive interval of qubit indices this product state spans: [start, end].
+    pub interval: (usize, usize),
+    /// Default mixed state used for indices in the interval not explicitly mapped.
+    pub padding: MixPair<T>,
+    /// Mapping from selected qubit indices to independent mixed single-qubit states.
+    pub idx_to_mix: BTreeMap<usize, MixPair<T>>,
+}
 
-    /// Constructs a new Bra state. Returns `State::Null` if `phase == 0` or both `c0` and `c1` are zero.
-    pub fn new_bra(c0: Cpx, c1: Cpx, phase: Cpx) -> Self {
-        if phase.is_zero() || (c0.is_zero() && c1.is_zero()) {
-            State::Null
-        } else {
-            State::Bra { c0, c1, phase }
-        }
-    }
+/// Enum representing a type of rank-1 operator: either a projector or a nilpotent.
+///
+/// - `Projector` corresponds to `|ψ⟩⟨ψ|`, a Hermitian, idempotent rank-1 operator.
+/// - `Nilpotent` corresponds to either `|ψ⟩⟨ψ⊥|` or `|ψ⊥⟩⟨ψ|`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProNil {
+    /// A Hermitian rank-1 projector: `|ψ⟩⟨ψ|`.
+    Projector,
+    /// A rank-1 nilpotent operator: `|ψ⟩⟨ψ⊥|` or `|ψ⊥⟩⟨ψ|`.
+    Nilpotent,
+}
 
-    /// Returns `true` if the state is a ket.
-    pub fn is_ket(&self) -> bool {
-        matches!(self, State::Ket { .. })
-    }
+/// A rank-1 operator (projector or nilpotent) constructed from a normalized qubit state.
+///
+/// Combines a `NormPair<T>` with an operator type and orientation tag. The `BraKet` field determines
+/// the side (bra or ket) of the defining vector. For `Nilpotent`, the orthogonal complement is implied
+/// on the opposite side of the rank-1 outer product.
+///
+/// Examples:
+/// - `Projector` + `BraKet::Ket` with `|ψ⟩` → `|ψ⟩⟨ψ|`
+/// - `Nilpotent` + `BraKet::Bra` with `⟨ψ|` → `|ψ⊥⟩⟨ψ|`
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Rk1PN<T: FloatExt + Hash> {
+    /// Operator type: projector or nilpotent.
+    pub pro_nil: ProNil,
+    /// Indicates whether the vector is a bra or ket.
+    pub bra_ket: BraKet,
+    /// Canonical normalized qubit state defining the operator.
+    pub norm_pair: NormPair<T>,
+}
 
-    /// Returns `true` if the state is a bra.
-    pub fn is_bra(&self) -> bool {
-        matches!(self, State::Bra { .. })
-    }
+/// A general rank-1 matrix of the form`M = scalar × |ket⟩⟨bra|`.
+///
+/// This representation explicitly separates the ket (column) and bra (row) components of the matrix.
+/// The underlying vectors are normalized and canonically phase-fixed via `NormPair<T>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Rk1KB<T: FloatExt + Hash> {
+    /// The ket vector `|ψ⟩` defining the column part of the outer product.
+    pub ket: NormPair<T>,
+    /// The bra vector `⟨ϕ|` defining the row part of the outer product.
+    pub bra: NormPair<T>,
+}
 
-    /// Extracts the full complex global phase from the state.
-    pub fn phase(&self) -> Cpx {
-        match self {
-            Self::Null => ZERO,
-            Self::Bra { phase, c0, c1 } | Self::Ket { phase, c0, c1 } => {
-                if phase.is_zero() {
-                    ZERO
-                } else if c0.is_zero() {
-                    *phase * *c1
-                } else if c1.is_zero() {
-                    *phase * *c0
-                } else {
-                    let norm = c0.rad().hypot(c1.rad());
-                    let rot = c0.rot();
-                    *phase * norm * rot
-                }
-            }
-        }
-    }
+/// Enum representing a general rank-1 matrix operator.
+///
+/// This can be either a structured operator (`ProNil`) such as a projector or nilpotent,
+/// or a fully general rank-1 matrix formed from arbitrary normalized vectors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Rank1<T: FloatExt + Hash> {
+    /// A structured rank-1 operator: projector or nilpotent.
+    ProNil(Rk1PN<T>),
+    /// A general rank-1 matrix: `|ket⟩⟨bra|` with independent canonical vectors.
+    Other(Rk1KB<T>),
+}
 
-    /// Normalizes a pair of complex coefficients with preserved relative phase.
+/// Struct representing a raw 2x2 complex matrix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RawMat<T: FloatExt + Hash> {
+    /// A raw 2x2 complex matrix.
+    pub mat: [[Cpx<T>; 2]; 2],
+}
+
+/// Represents a general 2×2 complex matrix using the Pauli (complex-quaternion) basis.
+///
+/// The matrix is expressed as a linear combination of Pauli matrices:
+/// `M = a₀·I + a₁·X + a₂·Y + a₃·Z`, where each `aᵢ` is a complex coefficient (`Cpx<T>`).
+///
+/// This representation is useful for compact encode general 2×2 complex operators using the Pauli basis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CpxQuaternion<T: FloatExt + Hash> {
+    /// Coefficients `[a₀, a₁, a₂, a₃]` corresponding to the Pauli basis `{I, X, Y, Z}`, in that order.
+    pub coefficients: [Cpx<T>; 4],
+}
+
+/// Represents a 2×2 Hermitian matrix using the Pauli (complex-quaternion) basis.
+///
+/// The matrix is expressed as a real linear combination of Pauli matrices:
+/// `M = a₀·I + a₁·X + a₂·Y + a₃·Z`, where each `aᵢ` is a real coefficient (`T`).
+///
+/// This form compactly encodes Hermitian 2×2 operators.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RealQuaternion<T: FloatExt + Hash> {
+    /// Real coefficients `[a₀, a₁, a₂, a₃]` corresponding to the Pauli basis `{I, X, Y, Z}`, in that order.
+    pub coefficients: [T; 4],
+}
+
+/// Represents a 2×2 complex matrix with unit determinant, expressed in the Pauli (complex-quaternion) basis.
+///
+/// The matrix is written as a linear combination of Pauli matrices:
+/// `M = a₀·I + a₁·X + a₂·Y + a₃·Z`, where each `aᵢ` is a complex coefficient.
+///
+/// This struct stores only the non-identity coefficients `(a₁, a₂, a₃)`
+/// as fields `x`, `y`, and `z`, corresponding to the Pauli matrices `X`, `Y`, and `Z`.
+/// The identity coefficient `a₀` is computed implicitly to ensure `det(M) = 1`, using:
+///
+/// ```text
+/// det(M) = a₀² − a₁² − a₂² − a₃² = 1
+/// ⇒ a₀ = sqrt(1 + a₁² + a₂² + a₃²)
+/// ```
+///
+/// This compact form is well suited for representing special unitary matrices (SU(2)),
+/// rotations on the Bloch sphere, and Pauli-based gate decompositions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Det1CpxQuaternion<T: FloatExt + Hash> {
+    /// Coefficient of the Pauli X component.
+    pub x: Cpx<T>,
+
+    /// Coefficient of the Pauli Y component.
+    pub y: Cpx<T>,
+
+    /// Coefficient of the Pauli Z component.
+    pub z: Cpx<T>,
+}
+
+/// Represents a 2×2 Hermitian matrix with unit determinant, expressed in the Pauli (real-quaternion) basis.
+///
+/// As with the complex case, the matrix is expressed as:
+/// `M = a₀·I + a₁·X + a₂·Y + a₃·Z`, but each `aᵢ` is real, and the identity component
+/// `a₀` is computed implicitly to satisfy the determinant constraint:
+///
+/// ```text
+/// det(M) = a₀² − a₁² − a₂² − a₃² = 1
+/// ⇒ a₀ = sqrt(1 + a₁² + a₂² + a₃²)
+/// ```
+///
+/// This form is useful for encoding Hermitian, unit-determinant operators, such as traceless generators
+/// of real-valued quantum dynamics or normalized observables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Det1RealQuaternion<T: FloatExt + Hash> {
+    /// Coefficient of the Pauli X component.
+    pub x: T,
+
+    /// Coefficient of the Pauli Y component.
+    pub y: T,
+
+    /// Coefficient of the Pauli Z component.
+    pub z: T,
+}
+
+/// Represents a 2×2 complex matrix with unit determinant, expressed in the Pauli basis.
+///
+/// This enum distinguishes between:
+/// - `Hermitian`: real-valued Pauli coefficients (used for Hermitian unit-determinant matrices),
+/// - `Other`: complex-valued Pauli coefficients (for general SU(2) matrices).
+///
+/// Both variants implicitly encode the identity component `a₀` to satisfy `det(M) = 1`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Det1<T: FloatExt + Hash> {
+    /// A Hermitian matrix with real-valued Pauli components.
+    Hermitian(Det1RealQuaternion<T>),
+
+    /// A general complex matrix with potentially non-Hermitian structure.
+    Other(Det1CpxQuaternion<T>),
+}
+
+/// Represents a 2×2 complex matrix of rank 1 or 2, in a compact structured form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RankOneTwo<T: FloatExt + Hash> {
+    /// A rank-1 matrix of the form`M = |ket⟩⟨bra|`.
     ///
-    /// Returns `None` if both are zero. Otherwise, scales the pair to unit norm,
-    /// sets global phase aside, and expresses relative phase via `PL`.
+    /// This variant encodes a matrix as the outer product of a normalized ket and bra.
+    Rank1(Rank1<T>),
+
+    /// A full-rank 2×2 complex matrix with unit determinant.
     ///
-    /// - If one is zero, returns `(ZERO, ONE)` or `(ONE, ZERO)` accordingly.
-    /// - Otherwise, returns `(Cpx::Real, Cpx::PL)` normalized and regularized.
-    pub fn normalize_pair(c0: &Cpx, c1: &Cpx) -> Option<(Cpx, Cpx)> {
-        if c0.is_zero() && c1.is_zero() {
-            None
-        } else if c0.is_zero() {
-            Some((ZERO, ONE))
-        } else if c1.is_zero() {
-            Some((ONE, ZERO))
-        } else {
-            let r0 = c0.rad();
-            let r1 = c1.rad();
-            let norm = r0.hypot(r1);
-            let phase_diff = c1.ph() - c0.ph();
-            let new_c0 = Cpx::Real { re: r0 / norm };
-            let new_c1 = Cpx::PL {
-                rad: r1 / norm,
-                ph: phase_diff,
-            }
-            .regularize();
-            Some((new_c0, new_c1))
-        }
+    /// The matrix is expressed in the Pauli (quaternion) basis, and may be Hermitian or non-Hermitian.
+    Rank2(Det1<T>),
+}
+
+/// Represents a tensor product of local 2×2 complex operators acting on specific qubit indices.
+///
+/// This structure encodes a sparse tensor product of single-qubit operators. Each mapped entry
+/// specifies a `RankOneTwo<T>` acting on a particular qubit index. The full operator is
+/// constructed as an ordered tensor product over a specified interval of qubit indices. Indices
+/// not explicitly mapped use the provided `padding` operator.
+///
+/// This is useful for compactly representing structured operators such as Kraus operators.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LocalOps<T: FloatExt + Hash> {
+    /// Inclusive interval of qubit indices spanned by the tensor product: `[start, end]`.
+    pub interval: (usize, usize),
+
+    /// Default `RankOneTwo<T>` used for unmapped qubit indices within the interval.
+    pub padding: RankOneTwo<T>,
+
+    /// Mapping from selected qubit indices to non-default local operators.
+    pub idx_to_mat: BTreeMap<usize, RankOneTwo<T>>,
+}
+
+/// Returns the inclusive interval `[min, max]` spanned by the keys of a BTreeMap.
+/// Falls back to `default` if the map is empty.
+pub fn key_interval_or<K: Copy + Ord>(map: &BTreeMap<K, impl Sized>, default: (K, K)) -> (K, K) {
+    match (map.keys().next().copied(), map.keys().next_back().copied()) {
+        (Some(min), Some(max)) => (min, max),
+        _ => default,
+    }
+}
+
+/// Swaps the values at keys `i` and `j` in a BTreeMap if either is present.
+/// No effect if both keys are absent.
+pub fn swap_btree_entries<K: Ord + Copy, V>(map: &mut BTreeMap<K, V>, i: K, j: K) {
+    if i == j {
+        return;
     }
 
-    /// Normalizes the state to a standard representation with `phase = ONE`.
-    pub fn normalize(&self) -> Self {
-        match self {
-            Self::Null => Self::Null,
-            Self::Ket { c0, c1, .. } => match Self::normalize_pair(c0, c1) {
-                Some((nc0, nc1)) => Self::Ket {
-                    c0: nc0,
-                    c1: nc1,
-                    phase: ONE,
-                },
-                None => Self::Null,
-            },
-            Self::Bra { c0, c1, .. } => match Self::normalize_pair(c0, c1) {
-                Some((nc0, nc1)) => Self::Bra {
-                    c0: nc0,
-                    c1: nc1,
-                    phase: ONE,
-                },
-                None => Self::Null,
-            },
-        }
-    }
+    let i_val = map.remove(&i);
+    let j_val = map.remove(&j);
 
-    /// Regularize the state to a standard representation.
-    pub fn regularize(&self) -> Self {
-        match self {
-            Self::Null => Self::Null,
-            Self::Ket { .. } | Self::Bra { .. } => self.phase().regularize() * self.normalize(),
-        }
+    if let Some(val) = j_val {
+        map.insert(i, val);
     }
+    if let Some(val) = i_val {
+        map.insert(j, val);
+    }
+}
 
-    /// Get c0 from a state.
-    pub fn c0(&self) -> Cpx {
-        match self {
-            Self::Null => ZERO,
-            Self::Bra { phase, c0, c1 } | Self::Ket { phase, c0, c1 } => {
-                if phase.is_zero() | c0.is_zero() {
-                    ZERO
-                } else if c1.is_zero() {
-                    ONE
-                } else {
-                    let norm = c0.rad().hypot(c1.rad());
-                    Cpx::Real {
-                        re: c0.rad() / norm,
-                    }
-                }
-            }
-        }
-    }
-    /// Get c1 from a state.
-    pub fn c1(&self) -> Cpx {
-        match self {
-            Self::Null => ZERO,
-            Self::Bra { phase, c0, c1 } | Self::Ket { phase, c0, c1 } => {
-                if phase.is_zero() | c1.is_zero() {
-                    ZERO
-                } else if c0.is_zero() {
-                    ONE
-                } else {
-                    let norm = c0.rad().hypot(c1.rad());
-                    *c1 / norm * c0.rot().conj()
-                }
-            }
-        }
-    }
-
-    /// Apply a Hermitian conjugate (dagger) operation to convert between ket and bra.
+impl BraKet {
+    /// Returns the Hermitian conjugate (dagger) of the current `BraKet` variant.
+    ///
+    /// - `Bra` becomes `Ket`
+    /// - `Ket` becomes `Bra`
+    ///
+    /// This operation corresponds to taking the adjoint of a vector:
+    /// - `|ψ⟩† = ⟨ψ|`
+    /// - `⟨ψ|† = |ψ⟩`
     pub fn dag(&self) -> Self {
         match self {
-            Self::Null => Self::Null,
-            Self::Ket { c0, c1, phase } => Self::new_bra(c0.conj(), c1.conj(), phase.conj()),
-            Self::Bra { c0, c1, phase } => Self::new_ket(c0.conj(), c1.conj(), phase.conj()),
+            Bra => Ket,
+            Ket => Bra,
         }
     }
+}
 
-    /// Returns the orthogonal state with normalized coefficients.
+impl<T: FloatExt + Hash> NormPair<T> {
+    /// Conjugates the norm_pair.
+    pub fn conj(&self) -> Self {
+        Self {
+            c0: self.c0,
+            c1: self.c1.conj(),
+        }
+    }
+    /// Returns an orthogonal normalized qubit state.
     ///
-    /// Swaps and negates the coefficients to produce a perpendicular state.
-    /// Returns `Null` if the state is `Null` or zero-valued.
+    /// Given a qubit `|ψ⟩ = c₀|0⟩ + c₁|1⟩`, this returns an orthogonal state
+    /// `|ψ⊥⟩ = c₁*|0⟩ − c₀*|1⟩`, normalized and up to a global phase.
     pub fn orthogonal(&self) -> Self {
-        match self {
-            Self::Null => Self::Null,
-            Self::Ket { c0, c1, .. } => match Self::normalize_pair(c1, &-*c0) {
-                Some((nc0, nc1)) => Self::new_ket(nc0, nc1, ONE),
-                None => Self::Null,
+        let (c1_mag, c1_phase) = self.c1.factor_out();
+        let new_c0 = c1_mag.re(); // This radius from c1 is always non-negative.
+
+        match new_c0 {
+            val if val == T::zero() => Self {
+                c0: T::zero(),
+                c1: Cpx::ONE,
             },
-            Self::Bra { c0, c1, .. } => match Self::normalize_pair(c1, &-*c0) {
-                Some((nc0, nc1)) => Self::new_bra(nc0, nc1, ONE),
-                None => Self::Null,
+            val if val == T::one() => Self {
+                c0: T::one(),
+                c1: Cpx::ZERO,
+            },
+            _ => Self {
+                c0: new_c0,
+                c1: -c1_phase.conj() * self.c0,
             },
         }
     }
-
-    /// Computes the inner product between a bra and a ket, returning a complex scalar.
+    /// Factors out a global amplitude and phase to produce a canonical form.
     ///
-    /// Accepts either (Bra, Ket) or (Ket, Bra). Returns `ZERO` if either state is `Null`.
-    pub fn inner(&self, other: &State) -> Cpx {
-        match (self, other) {
-            (Self::Null, _) | (_, Self::Null) => ZERO,
-
-            (
-                Self::Bra { c0, c1, phase },
-                Self::Ket {
-                    c0: d0,
-                    c1: d1,
-                    phase: p2,
-                },
-            )
-            | (
-                Self::Ket { c0, c1, phase },
-                Self::Bra {
-                    c0: d0,
-                    c1: d1,
-                    phase: p2,
-                },
-            ) => (*phase * *p2 * (*c0 * *d0 + *c1 * *d1)).regularize(),
-
-            _ => panic!("inner() is only defined between a Ket and a Bra."),
-        }
-    }
-
-    /// Computes the outer product of a ket and a bra, yielding a rank-1 2×2 matrix.
+    /// This ensures a unique and hashable representation by:
+    /// - Forcing `c0 ∈ ℝ≥0` (non-negative real),
+    /// - Normalizing the pair to unit ℓ₂-norm,
+    /// - Extracting any global phase into a separate complex scalar.
     ///
-    /// Accepts (Ket, Bra) or (Bra, Ket) order. Extracts phase and normalizes using `.regularize()`.
-    pub fn outer(&self, other: &State) -> Option<Rank1> {
-        let scalar = self.phase() * other.phase();
-        let new_self = self.normalize();
-        let new_other = other.normalize();
+    /// Returns:
+    /// - `None` if both amplitudes are zero.
+    /// - Otherwise, returns a triple `(canonical, sqrt_prob, phase)` such that: original = sqrt_prob × phase × canonical
+    ///   , where:
+    /// - `canonical` is a `NormPair` with unit norm and canonical phase,
+    /// - `sqrt_prob ∈ ℝ≥0` is the amplitude magnitude,
+    /// - `phase ∈ ℂ` is the global phase factor.
+    pub fn try_factor_out(&self) -> Option<(Self, T, Cpx<T>)> {
+        let zero = T::zero();
+        let one = T::one();
 
-        match (new_self, new_other) {
-            (Self::Ket { .. }, Self::Bra { .. }) | (Self::Bra { .. }, Self::Ket { .. }) => {
-                let (ket, bra) = if matches!(new_self, Self::Ket { .. }) {
-                    (new_self, new_other)
+        match (self.c0 == zero, matches!(self.c1, Cpx::Zero {})) {
+            (true, true) => None,
+            (true, false) => {
+                let (sqrt_prob, ph) = self.c1.factor_out();
+                Some((
+                    Self {
+                        c0: zero,
+                        c1: Cpx::ONE,
+                    },
+                    sqrt_prob.re(),
+                    ph,
+                ))
+            }
+            (false, true) => {
+                let c0_sign = if self.c0 > zero {
+                    Cpx::ONE
                 } else {
-                    (new_other, new_self)
+                    Cpx::NEG_ONE
                 };
+                Some((
+                    Self {
+                        c0: one,
+                        c1: Cpx::ZERO,
+                    },
+                    self.c0.abs(),
+                    c0_sign,
+                ))
+            }
+            (false, false) => {
+                // Normalize and extract global phase from c0
+                let norm = self.c0.hypot(self.c1.rad());
+                let c0_sign = if self.c0 > zero { one } else { -one };
+                let c0_real = (self.c0 / norm).abs();
+                let c1_rel = self.c1 / norm * c0_sign;
 
-                Some(Rank1 { scalar, ket, bra })
+                Some((
+                    Self {
+                        c0: c0_real,
+                        c1: c1_rel,
+                    },
+                    norm,
+                    Cpx::Real { re: c0_sign },
+                ))
+            }
+        }
+    }
+}
+
+impl<T: FloatExt + Hash> NormQubit<T> {
+    /// Returns the Hermitian conjugate (dagger) of the qubit representation,
+    /// flipping `Bra` ↔ `Ket` and complex-conjugating the internal coefficients.
+    pub fn dag(&self) -> Self {
+        Self {
+            norm_pair: self.norm_pair.conj(),
+            bra_ket: self.bra_ket.dag(),
+        }
+    }
+    /// Converts the `NormQubit` to its bra representation.
+    /// If it is currently a ket, then return the Hermitian conjugate (dagger).
+    pub fn to_bra(&self) -> Self {
+        match self.bra_ket {
+            Bra => *self,
+            Ket => self.dag(),
+        }
+    }
+    /// Converts the `NormQubit` to its ket representation.
+    /// If it is currently a bra, then return the Hermitian conjugate (dagger).
+    pub fn to_ket(&self) -> Self {
+        match self.bra_ket {
+            Ket => *self,
+            Bra => self.dag(),
+        }
+    }
+    /// Returns a normalized qubit orthogonal to `self`.
+    pub fn orthogonal(&self) -> Self {
+        Self {
+            bra_ket: self.bra_ket,
+            norm_pair: self.norm_pair.orthogonal(),
+        }
+    }
+    /// Factors out a global amplitude and phase from the normalized qubit state.
+    ///
+    /// This provides a canonical decomposition of the form: original = sqrt_prob × phase × canonical, where:
+    /// - `canonical` is a `NormQubit` with unit ℓ₂-norm and canonical phase,
+    /// - `sqrt_prob ∈ ℝ≥0` is the size of the original state vector,
+    /// - `phase ∈ ℂ` is the global complex phase.
+    ///
+    /// The result ensures:
+    /// - `norm_pair.c0 ∈ ℝ≥0`
+    /// - `canonical` is uniquely determined up to this constraint
+    ///
+    /// Returns:
+    /// - `None` if both amplitudes are zero.
+    /// - `Some(( canonical, sqrt_prob, phase))` otherwise.
+    pub fn try_factor_out(&self) -> Option<(Self, T, Cpx<T>)> {
+        self.norm_pair
+            .try_factor_out()
+            .map(|(norm_pair, sqrt_prob, phase)| {
+                (
+                    Self {
+                        norm_pair,
+                        bra_ket: self.bra_ket,
+                    },
+                    sqrt_prob,
+                    phase,
+                )
+            })
+    }
+    /// Computes the inner product ⟨self|ket⟩ between two normalized qubits.
+    ///
+    /// `self` is interpreted as a bra, and `ket` as a ket.
+    /// Automatically converts representations if necessary.
+    pub fn inner(&self, ket: &Self) -> Cpx<T> {
+        let bra_pair = self.to_bra().norm_pair;
+        let ket_pair = ket.to_ket().norm_pair;
+        (bra_pair.c1 * ket_pair.c1) + (bra_pair.c0 * ket_pair.c0)
+    }
+    /// Computes the outer product `|self⟩⟨other|` between two normalized qubit states,
+    /// returning a canonical rank-1 matrix representation.
+    ///
+    /// This method interprets:
+    /// - `self` as a ket vector (`|ψ⟩`)
+    /// - `bra` as a bra vector (`⟨φ|`)
+    ///
+    /// It automatically converts the internal orientations (`BraKet`) of each input
+    /// to ensure proper `ket–bra` alignment. The resulting operator is classified as:
+    ///
+    /// - `Projector` if `⟨bra| == ⟨self|` (i.e., `|self⟩⟨self|`);
+    /// - `Nilpotent` if `⟨bra| == ⟨self⊥|` (i.e., `|self⟩⟨self⊥|`);
+    /// - `Rank1::Other` for a general outer product `|ket⟩⟨bra|`.
+    ///
+    /// This ensures canonical detection and representation of projector and nilpotent
+    /// operators when applicable.
+    pub fn outer(&self, bra: &Self) -> Rank1<T> {
+        let ket = self.to_ket().norm_pair;
+        let bra = bra.to_bra().norm_pair;
+        let conj_ket = ket.conj();
+
+        if conj_ket == bra {
+            Rank1::ProNil(Rk1PN {
+                pro_nil: Projector,
+                bra_ket: Ket,
+                norm_pair: ket,
+            })
+        } else if conj_ket.orthogonal() == bra {
+            Rank1::ProNil(Rk1PN {
+                pro_nil: Nilpotent,
+                bra_ket: Ket,
+                norm_pair: ket,
+            })
+        } else {
+            Rank1::Other(Rk1KB { ket, bra })
+        }
+    }
+}
+
+impl<T: FloatExt + Hash> MixPair<T> {
+    /// Returns the complex conjugate of this mixed state.
+    ///
+    /// Conjugates the underlying normalized state while preserving the probability weight.
+    pub fn conj(&self) -> Self {
+        Self {
+            prob: self.prob,
+            norm_pair: self.norm_pair.conj(),
+        }
+    }
+
+    /// Returns the orthogonal mixed state with the same probability.
+    ///
+    /// Constructs a new mixed state whose primary component is orthogonal to the original.
+    pub fn orthogonal(&self) -> Self {
+        Self {
+            prob: self.prob,
+            norm_pair: self.norm_pair.orthogonal(),
+        }
+    }
+
+    /// Computes the purity of the mixed state: `Trace(ρ²) = p² + (1 - p)²`.
+    ///
+    /// Purity ranges from `0.5` (maximally mixed) to `1.0` (pure state).
+    pub fn purity(&self) -> T {
+        let p = self.prob;
+        p.powi(2) + (T::one() - p).powi(2)
+    }
+
+    /// Computes the von Neumann entropy of the mixed state.
+    ///
+    /// Returns `−p ln(p) − (1 − p) ln(1 − p)` if `p ∈ (0, 1)`, and `0` if pure.
+    /// Entropy is zero for pure states and maximal (ln 2) when `p = 0.5`.
+    pub fn entropy_vn(&self) -> T {
+        let zero = T::zero();
+        let one = T::one();
+        let p = self.prob;
+        if (p != one) && (p != zero) {
+            -p * p.ln() - (one - p) * (one - p).ln()
+        } else {
+            zero
+        }
+    }
+}
+
+impl<T: FloatExt + Hash> MixQubit<T> {
+    /// Returns the Hermitian conjugate (dagger) of this mixed qubit state.
+    ///
+    /// Flips the `BraKet` orientation while preserving the mixed content.
+    pub fn dag(&self) -> Self {
+        Self {
+            bra_ket: self.bra_ket.dag(),
+            mix_pair: self.mix_pair.conj(),
+        }
+    }
+
+    /// Returns the orthogonal mixed state with the same orientation and probability.
+    ///
+    /// The primary and orthogonal components are swapped, maintaining the same weighting.
+    pub fn orthogonal(&self) -> Self {
+        Self {
+            bra_ket: self.bra_ket,
+            mix_pair: self.mix_pair.orthogonal(),
+        }
+    }
+
+    /// Returns the purity `Trace(ρ²)` of the underlying mixed state.
+    pub fn purity(&self) -> T {
+        self.mix_pair.purity()
+    }
+
+    /// Returns the von Neumann entropy of the underlying mixed state.
+    pub fn entropy_vn(&self) -> T {
+        self.mix_pair.entropy_vn()
+    }
+}
+
+impl<T: FloatExt + Hash> IdxToNorm<T> {
+    /// Returns the complex conjugate of this `IdxToNorm`.
+    ///
+    /// Applies conjugation to all `NormPair<T>` entries and the padding.
+    pub fn conj(&self) -> Self {
+        Self {
+            interval: self.interval,
+            padding: self.padding.conj(),
+            idx_to_norm: self
+                .idx_to_norm
+                .iter()
+                .map(|(k, v)| (*k, v.conj()))
+                .collect(),
+        }
+    }
+
+    /// Factors out the global amplitude and phase from each `NormPair`,
+    /// returning a new `IdxToNorm` with canonicalized entries,
+    /// and extracting the total amplitude and phase.
+    ///
+    /// Returns:
+    /// - `None` if any `NormPair` fails to factor (e.g., is zero),
+    /// - Otherwise, returns `(canonicalized_self, total_sqrt_prob, total_phase)`.
+    pub fn try_factor_out(&self) -> Option<(Self, T, Cpx<T>)> {
+        let mut idx_to_norm = BTreeMap::new();
+        let mut acc_sqrt_prob = T::one();
+        let mut acc_phase = Cpx::ONE;
+
+        for (&k, v) in &self.idx_to_norm {
+            let (canon, sqrt_prob, phase) = v.try_factor_out()?;
+            idx_to_norm.insert(k, canon);
+            acc_sqrt_prob = acc_sqrt_prob * sqrt_prob;
+            acc_phase *= phase;
+        }
+
+        Some((
+            Self {
+                interval: self.interval,
+                padding: self.padding,
+                idx_to_norm,
+            },
+            acc_sqrt_prob,
+            acc_phase,
+        ))
+    }
+
+    /// Returns the list of qubit indices that have explicitly assigned normalized states.
+    pub fn indices_keys(&self) -> Vec<usize> {
+        self.idx_to_norm.keys().copied().collect()
+    }
+
+    /// Returns the inclusive interval of explicitly assigned qubit indices, if any.
+    ///
+    /// This is equivalent to `(min_index, max_index)` over the `idx_to_norm` map.
+    /// Returns `(None, None)` if the map is empty.
+    pub fn try_interval(&self) -> (Option<usize>, Option<usize>) {
+        let min = self.idx_to_norm.keys().next().copied();
+        let max = self.idx_to_norm.keys().next_back().copied();
+        (min, max)
+    }
+
+    /// Returns a new `IdxToNorm` with its interval adjusted to match the minimum and maximum keys
+    /// present in the `idx_to_norm` map.
+    ///
+    /// This method is useful for automatically syncing the `interval` field with the actual
+    /// span of explicitly defined qubit indices.
+    ///
+    /// # Returns
+    /// - `Some(Self)` with the updated interval if `idx_to_norm` is non-empty.
+    /// - `None` if `idx_to_norm` is empty, as there are no keys to determine an interval.
+    pub fn try_fit_interval(&self) -> Option<Self> {
+        let (min, max) = self.try_interval();
+        Some(Self {
+            interval: (min?, max?),
+            padding: self.padding,
+            idx_to_norm: self.idx_to_norm.clone(),
+        })
+    }
+
+    /// Returns a new `IdxToNorm` where all indices in the interval are explicitly filled.
+    ///
+    /// For any index within `self.interval` that does not appear in `idx_to_norm`, this method
+    /// inserts an entry with the `padding` value. The result is a fully populated BTreeMap with
+    /// no missing indices in the defined interval.
+    pub fn extract_padding(&self) -> Self {
+        let mut idx_to_norm = self.idx_to_norm.clone();
+        let (start, end) = self.interval;
+
+        for i in start..=end {
+            idx_to_norm.entry(i).or_insert(self.padding);
+        }
+
+        Self {
+            interval: self.interval,
+            padding: self.padding,
+            idx_to_norm,
+        }
+    }
+
+    /// Returns a new `IdxToNorm` with the specified interval, leaving all other fields unchanged.
+    ///
+    /// This method updates the `interval` field while cloning the existing `padding`
+    /// and `idx_to_norm` map.
+    pub fn set_interval(&self, interval: (usize, usize)) -> Self {
+        Self {
+            interval,
+            padding: self.padding,
+            idx_to_norm: self.idx_to_norm.clone(),
+        }
+    }
+
+    /// Returns a new `IdxToNorm` with the specified padding value,
+    /// leaving the interval and index-to-norm map unchanged.
+    pub fn set_padding(&self, padding: NormPair<T>) -> Self {
+        Self {
+            interval: self.interval,
+            padding,
+            idx_to_norm: self.idx_to_norm.clone(),
+        }
+    }
+    /// Returns a new `IdxToNorm` with the specified indices removed from `idx_to_norm`.
+    ///
+    /// This method creates a copy of the current structure and removes any entries whose keys
+    /// match the provided indices. The original `interval` and `padding` are preserved.
+    ///
+    /// # Type Parameters
+    /// - `I`: An iterable collection of `usize` indices to remove.
+    ///
+    /// # Arguments
+    /// - `indices`: Any iterable over `usize` values (e.g., a `Vec`, array, range, or `HashSet`).
+    ///
+    /// # Returns
+    /// A new `IdxToNorm` with the specified indices removed from the map.
+    ///
+    /// # Examples
+    /// ```rust
+    /// //let pruned = original.discard(vec![1, 2, 4]);
+    /// //let pruned = original.discard([3, 5, 7]);
+    /// //let pruned = original.discard(0..=10);
+    /// ```
+    pub fn discard<I: IntoIterator<Item = usize>>(&self, indices: I) -> Self {
+        let mut new_map = self.idx_to_norm.clone();
+        for idx in indices {
+            new_map.remove(&idx);
+        }
+
+        Self {
+            interval: self.interval,
+            padding: self.padding,
+            idx_to_norm: new_map,
+        }
+    }
+    /// Returns a new `IdxToNorm` with additional entries merged into `idx_to_norm`.
+    ///
+    /// For each `(index, norm_pair)` in the provided `idx_to_norm` map, if the index is not already present
+    /// in the current map, it is inserted. Existing entries are left unchanged.
+    ///
+    /// The resulting interval is updated to span the full range of indices in the combined map, unless the map
+    /// becomes empty, in which case the original interval is retained.
+    ///
+    /// # Arguments
+    ///
+    /// * `idx_to_norm` - A `BTreeMap<usize, NormPair<T>>` containing new entries to insert.
+    ///
+    /// # Returns
+    ///
+    /// A new `IdxToNorm` with the merged map and updated interval.
+    pub fn extend(&self, idx_to_norm: BTreeMap<usize, NormPair<T>>) -> Self {
+        let mut new_map = self.idx_to_norm.clone();
+        for (k, v) in idx_to_norm {
+            new_map.entry(k).or_insert(v);
+        }
+
+        let interval = key_interval_or(&new_map, self.interval);
+
+        Self {
+            interval,
+            padding: self.padding,
+            idx_to_norm: new_map,
+        }
+    }
+
+    /// Returns a new `IdxToNorm` with the given entries forcibly updated.
+    ///
+    /// For each `(index, norm_pair)` in the provided map:
+    /// - Any existing entry at that index is removed.
+    /// - The new entry is inserted unconditionally.
+    ///
+    /// The updated `idx_to_norm` map reflects all changes, and the interval is recomputed to
+    /// span the full range of keys present in the new map (if non-empty).
+    ///
+    /// # Arguments
+    ///
+    /// * `idx_to_norm` - A `BTreeMap<usize, NormPair<T>>` containing entries to overwrite.
+    ///
+    /// # Returns
+    ///
+    /// A new `IdxToNorm` with the forcibly updated entries and recalculated interval.
+    pub fn force_update(&self, idx_to_norm: BTreeMap<usize, NormPair<T>>) -> Self {
+        let mut new_map = self.idx_to_norm.clone();
+
+        for (k, v) in idx_to_norm {
+            new_map.insert(k, v); // `insert` already replaces the value if key exists
+        }
+
+        let interval = key_interval_or(&new_map, self.interval);
+
+        Self {
+            interval,
+            padding: self.padding,
+            idx_to_norm: new_map,
+        }
+    }
+    /// Returns a new `IdxToNorm` with the values at two indices swapped.
+    ///
+    /// If both indices exist in `idx_to_norm`, their values are swapped.
+    /// If only one exists, its value is moved to the other index.
+    /// If neither exist, the mapping is unchanged.
+    ///
+    /// # Arguments
+    /// * `i` - The first index.
+    /// * `j` - The second index.
+    pub fn swap(&self, i: usize, j: usize) -> Self {
+        if i == j {
+            return self.clone(); // No-op
+        }
+
+        let mut new_map = self.idx_to_norm.clone();
+        swap_btree_entries(&mut new_map, i, j);
+
+        let interval = key_interval_or(&new_map, self.interval);
+
+        Self {
+            interval,
+            padding: self.padding,
+            idx_to_norm: new_map,
+        }
+    }
+}
+
+impl<T: FloatExt + Hash> SepQubits<T> {
+    /// Returns the Hermitian conjugate of the separable multi-qubit state.
+    pub fn dag(&self) -> Self {
+        Self {
+            bra_ket: self.bra_ket.dag(),
+            idx_to_norm: self.idx_to_norm.conj(),
+        }
+    }
+
+    /// Converts the `SepQubit` to its bra representation.
+    /// If it is currently a ket, then return the Hermitian conjugate (dagger).
+    pub fn to_bra(&self) -> Self {
+        match self.bra_ket {
+            Bra => self.clone(),
+            Ket => self.dag(),
+        }
+    }
+
+    /// Converts the `SepQubit` to its ket representation.
+    /// If it is currently a bra, then return the Hermitian conjugate (dagger).
+    pub fn to_ket(&self) -> Self {
+        match self.bra_ket {
+            Ket => self.clone(),
+            Bra => self.dag(),
+        }
+    }
+
+    /// Factors out a global amplitude and phase from all `NormPair`s in the `SepQubit`.
+    ///
+    /// Returns:
+    /// - `None` if any entry fails to factor (e.g., all-zero),
+    /// - Otherwise, the canonicalized structure and overall factor.
+    ///
+    /// Satisfies: `original = sqrt_prob × phase × canonical`.
+    pub fn try_factor_out(&self) -> Option<(Self, T, Cpx<T>)> {
+        let (idx_to_norm, sqrt_prob, phase) = self.idx_to_norm.try_factor_out()?;
+        Some((
+            Self {
+                bra_ket: self.bra_ket,
+                idx_to_norm,
+            },
+            sqrt_prob,
+            phase,
+        ))
+    }
+
+    /// Computes the inner product ⟨self|ket⟩ between two `SepQubits<T>`, using the union of their intervals.
+    ///
+    /// This method interprets `self` as a bra and `ket` as a ket, aligning their index intervals and
+    /// applying padding where necessary. Only indices within the specified interval are used;
+    /// entries outside the interval (even if present in the underlying `BTreeMap`) are ignored.
+    ///
+    /// The inner product is computed as a product of local inner products at each index:
+    /// ⟨ψ|ϕ⟩ = ∏ᵢ ⟨ψᵢ|ϕᵢ⟩.
+    /// Returns `Cpx::ZERO` early if any local inner product is zero, and skips multiplying by `1` for efficiency.
+    pub fn inner(&self, ket: &Self) -> Cpx<T> {
+        let bra = self.to_bra().idx_to_norm;
+        let ket = ket.to_ket().idx_to_norm;
+
+        let (min, max) = {
+            let (bra_min, bra_max) = bra.interval;
+            let (ket_min, ket_max) = ket.interval;
+            (min(bra_min, ket_min), max(bra_max, ket_max))
+        };
+
+        let bra = bra.set_interval((min, max)).extract_padding();
+        let ket = ket.set_interval((min, max)).extract_padding();
+
+        let mut acc = Cpx::ONE;
+        for idx in min..max {
+            let NormPair { c0: b0, c1: b1 } = bra.idx_to_norm[&idx];
+            let NormPair { c0: k0, c1: k1 } = ket.idx_to_norm[&idx];
+            let inner = b1 * k1 + b0 * k0;
+            if matches!(inner, Cpx::Zero {}) {
+                return Cpx::ZERO;
+            } else if matches!(inner, Cpx::One {}) {
+                continue;
+            }
+            acc *= inner;
+        }
+
+        acc
+    }
+
+    /// Returns a vector of all explicit qubit indices.
+    pub fn indices_keys(&self) -> Vec<usize> {
+        self.idx_to_norm.indices_keys()
+    }
+
+    /// Returns the inclusive interval of explicitly assigned qubit indices, if any.
+    ///
+    /// This is equivalent to `(min_index, max_index)` over the `idx_to_norm` map.
+    /// Returns `(None, None)` if the map is empty.
+    pub fn try_interval(&self) -> (Option<usize>, Option<usize>) {
+        let min = self.idx_to_norm.idx_to_norm.keys().next().copied();
+        let max = self.idx_to_norm.idx_to_norm.keys().next_back().copied();
+        (min, max)
+    }
+
+    /// Attempts to shrink the interval to fit the range of explicitly defined indices.
+    /// Returns `None` if `idx_to_norm` is empty.
+    pub fn try_fit_interval(&self) -> Option<Self> {
+        self.idx_to_norm.try_fit_interval().map(|idx_to_norm| Self {
+            bra_ket: self.bra_ket,
+            idx_to_norm,
+        })
+    }
+
+    /// Returns a new `SepQubits` where all missing entries in the interval are filled with padding.
+    pub fn extract_padding(&self) -> Self {
+        Self {
+            bra_ket: self.bra_ket,
+            idx_to_norm: self.idx_to_norm.extract_padding(),
+        }
+    }
+
+    /// Returns a new `SepQubits` with the interval manually updated.
+    pub fn set_interval(&self, interval: (usize, usize)) -> Self {
+        Self {
+            bra_ket: self.bra_ket,
+            idx_to_norm: self.idx_to_norm.set_interval(interval),
+        }
+    }
+
+    /// Returns a new `SepQubits` with a new padding value.
+    pub fn set_padding(&self, padding: NormPair<T>) -> Self {
+        Self {
+            bra_ket: self.bra_ket,
+            idx_to_norm: self.idx_to_norm.set_padding(padding),
+        }
+    }
+
+    /// Returns a new `SepQubits` with specified indices removed from the explicit assignments.
+    pub fn discard<I: IntoIterator<Item = usize>>(&self, indices: I) -> Self {
+        Self {
+            bra_ket: self.bra_ket,
+            idx_to_norm: self.idx_to_norm.discard(indices),
+        }
+    }
+
+    /// Returns a new `SepQubits` with additional explicit assignments added if not already present.
+    pub fn extend(&self, idx_to_norm: BTreeMap<usize, NormPair<T>>) -> Self {
+        Self {
+            bra_ket: self.bra_ket,
+            idx_to_norm: self.idx_to_norm.extend(idx_to_norm),
+        }
+    }
+
+    /// Returns a new `SepQubits` with the provided explicit assignments forcibly updated.
+    pub fn force_update(&self, idx_to_norm: BTreeMap<usize, NormPair<T>>) -> Self {
+        Self {
+            bra_ket: self.bra_ket,
+            idx_to_norm: self.idx_to_norm.force_update(idx_to_norm),
+        }
+    }
+
+    /// Returns a new `SepQubits` with entries at indices `i` and `j` swapped.
+    ///
+    /// If only one of the two exists in the current map, its value is moved to the other index.
+    /// If neither exists, the map is unchanged.
+    pub fn swap(&self, i: usize, j: usize) -> Self {
+        Self {
+            bra_ket: self.bra_ket,
+            idx_to_norm: self.idx_to_norm.swap(i, j),
+        }
+    }
+}
+
+impl<T: FloatExt + Hash> IdxToMixQubits<T> {
+    /// Returns the Hermitian conjugate of the separable multi-qubit mixed state.
+    pub fn dag(&self) -> Self {
+        Self {
+            bra_ket: self.bra_ket.dag(),
+            interval: self.interval,
+            padding: self.padding.conj(),
+            idx_to_mix: self
+                .idx_to_mix
+                .iter()
+                .map(|(k, v)| (*k, v.conj()))
+                .collect(),
+        }
+    }
+    /// Returns a vector of all explicit qubit indices.
+    pub fn indices_keys(&self) -> Vec<usize> {
+        self.idx_to_mix.keys().copied().collect()
+    }
+
+    /// Returns the inclusive interval of explicitly assigned qubit indices, if any.
+    ///
+    /// This is equivalent to `(min_index, max_index)` over the `idx_to_mix` map.
+    /// Returns `(None, None)` if the map is empty.
+    pub fn try_interval(&self) -> (Option<usize>, Option<usize>) {
+        let min = self.idx_to_mix.keys().next().copied();
+        let max = self.idx_to_mix.keys().next_back().copied();
+        (min, max)
+    }
+
+    /// Attempts to shrink the interval to fit the range of explicitly defined indices.
+    /// Returns `None` if `idx_to_mix` is empty.
+    pub fn try_fit_interval(&self) -> Option<Self> {
+        let (min, max) = self.try_interval();
+        Some(Self {
+            bra_ket: self.bra_ket,
+            interval: (min?, max?),
+            padding: self.padding,
+            idx_to_mix: self.idx_to_mix.clone(),
+        })
+    }
+
+    /// Returns a new `IdxToMixQubits` where all missing entries in the interval are filled with padding.
+    pub fn extract_padding(&self) -> Self {
+        let mut idx_to_mix = self.idx_to_mix.clone();
+        let (start, end) = self.interval;
+
+        for i in start..=end {
+            idx_to_mix.entry(i).or_insert(self.padding);
+        }
+
+        Self {
+            bra_ket: self.bra_ket,
+            interval: self.interval,
+            padding: self.padding,
+            idx_to_mix,
+        }
+    }
+
+    /// Returns a new `IdxToMixQubits` with the interval manually updated.
+    pub fn set_interval(&self, interval: (usize, usize)) -> Self {
+        Self {
+            bra_ket: self.bra_ket,
+            interval,
+            padding: self.padding,
+            idx_to_mix: self.idx_to_mix.clone(),
+        }
+    }
+
+    /// Returns a new `IdxToMixQubits` with a new padding value.
+    pub fn set_padding(&self, padding: MixPair<T>) -> Self {
+        Self {
+            bra_ket: self.bra_ket,
+            interval: self.interval,
+            padding,
+            idx_to_mix: self.idx_to_mix.clone(),
+        }
+    }
+
+    /// Returns a new `IdxToMixQubits` with specified indices removed from the explicit assignments.
+    pub fn discard<I: IntoIterator<Item = usize>>(&self, indices: I) -> Self {
+        let mut new_map = self.idx_to_mix.clone();
+        for idx in indices {
+            new_map.remove(&idx);
+        }
+
+        Self {
+            bra_ket: self.bra_ket,
+            interval: self.interval,
+            padding: self.padding,
+            idx_to_mix: new_map,
+        }
+    }
+
+    /// Returns a new `IdxToMixQubits` with additional explicit assignments added if not already present.
+    pub fn extend(&self, idx_to_mix: BTreeMap<usize, MixPair<T>>) -> Self {
+        let mut new_map = self.idx_to_mix.clone();
+        for (k, v) in idx_to_mix {
+            new_map.entry(k).or_insert(v);
+        }
+
+        let interval = key_interval_or(&new_map, self.interval);
+
+        Self {
+            bra_ket: self.bra_ket,
+            interval,
+            padding: self.padding,
+            idx_to_mix: new_map,
+        }
+    }
+
+    /// Returns a new `IdxToMixQubits` with the provided explicit assignments forcibly updated.
+    pub fn force_update(&self, idx_to_mix: BTreeMap<usize, MixPair<T>>) -> Self {
+        let mut new_map = self.idx_to_mix.clone();
+
+        for (k, v) in idx_to_mix {
+            new_map.insert(k, v); // `insert` already replaces the value if key exists
+        }
+
+        let interval = key_interval_or(&new_map, self.interval);
+
+        Self {
+            bra_ket: self.bra_ket,
+            interval,
+            padding: self.padding,
+            idx_to_mix: new_map,
+        }
+    }
+
+    /// Returns a new `IdxToMixQubits` with entries at indices `i` and `j` swapped.
+    ///
+    /// If only one of the two exists in the current map, its value is moved to the other index.
+    /// If neither exists, the map is unchanged.
+    pub fn swap(&self, i: usize, j: usize) -> Self {
+        if i == j {
+            return self.clone(); // No-op
+        }
+
+        let mut new_map = self.idx_to_mix.clone();
+        swap_btree_entries(&mut new_map, i, j);
+
+        let interval = key_interval_or(&new_map, self.interval);
+
+        Self {
+            bra_ket: self.bra_ket,
+            interval,
+            padding: self.padding,
+            idx_to_mix: new_map,
+        }
+    }
+}
+
+impl<T: FloatExt + Hash> Rk1PN<T> {
+    /// Factors out the global amplitude (probability weight) from the rank-1 projector or nilpotent operator.
+    ///
+    /// The underlying `norm_qubit` is decomposed into a canonical form and the scalar amplitude.
+    /// This method returns a pair `(canonical, prob)` where:
+    /// - `canonical` is a `Rk1PN` with a normalized pure qubit state (unit norm and canonical phase),
+    /// - `prob` is the squared magnitude (`sqrt_prob²`) representing the overall probability weight.
+    ///
+    /// Returns:
+    /// - `None` if the underlying state is zero (no meaningful decomposition).
+    /// - `Some(( canonical, prob))` otherwise.
+    pub fn try_factor_out(self) -> Option<(Self, T)> {
+        self.norm_pair
+            .try_factor_out()
+            .map(|(norm, sqrt_prob, ..)| {
+                (
+                    Self {
+                        bra_ket: self.bra_ket,
+                        norm_pair: norm,
+                        pro_nil: self.pro_nil,
+                    },
+                    sqrt_prob.powi(2),
+                )
+            })
+    }
+    /// Returns the Hermitian conjugate (dagger) of the nilpotent matrix representation.
+    ///
+    /// If the operator is a nilpotent matrix, it returns a new one with an orthogonal qubit.
+    /// If it is a projector, it returns itself unchanged.
+    pub fn dag(self) -> Self {
+        match self.pro_nil {
+            Nilpotent => {
+                let norm_pair = self.norm_pair.orthogonal();
+                Self {
+                    bra_ket: self.bra_ket,
+                    norm_pair,
+                    pro_nil: Nilpotent,
+                }
+            }
+            Projector => self,
+        }
+    }
+    /// Returns the trace of a rank-1 projector or nilpotent matrix as a `Cpx<T>`.
+    pub fn trace(self) -> Cpx<T> {
+        let NormPair { c0, c1 } = self.norm_pair;
+
+        let dual = match self.pro_nil {
+            Projector => self.norm_pair.conj(),
+            Nilpotent => self.norm_pair.orthogonal().conj(),
+        };
+
+        Cpx::Real { re: c0 * dual.c0 } + c1 * dual.c1
+    }
+}
+
+impl<T: FloatExt + Hash> Rk1KB<T> {
+    /// Factors out the combined amplitude and global phase from a general rank-1 operator.
+    ///
+    /// Validates that `ket` is a |ψ⟩ and `bra` is a ⟨ϕ|, then factors out their
+    /// respective global phases and magnitudes, returning:
+    ///
+    /// - `None` if either component is the zero state or has incorrect role labels.
+    /// - `Some(( canonical, prob, phase))` where:
+    ///   - `canonical` is a normalized version of the operator with unit-norm states,
+    ///   - `prob` is the product of the sqrt-probabilities,
+    ///   - `phase` is the product of their global phases.
+    pub fn try_factor_out(self) -> Option<(Self, T, Cpx<T>)> {
+        let ket_factored = self.ket.try_factor_out();
+        let bra_factored = self.bra.try_factor_out();
+
+        match (ket_factored, bra_factored) {
+            (Some((ket_norm, sqrt_ket, ph_ket)), Some((bra_norm, sqrt_bra, ph_bra))) => {
+                let sqrt_prob = sqrt_ket * sqrt_bra;
+                let phase = ph_ket * ph_bra;
+
+                Some((
+                    Self {
+                        ket: ket_norm,
+                        bra: bra_norm,
+                    },
+                    sqrt_prob,
+                    phase,
+                ))
             }
             _ => None,
         }
     }
-
-    /// Constructs the projector |ψ⟩⟨ψ| or its orthogonal complement from a normalized state.
+    /// Returns the Hermitian conjugate (dagger) of the `Rk1KB` matrix representation.
     ///
-    /// If `is_orthogonal` is `true`, computes the projector for the orthogonal state.
-    /// Returns `None` if the state is `Null`.
-    pub fn projector(&self, is_orthogonal: bool) -> Option<Projector> {
-        let state = if is_orthogonal {
-            self.normalize().orthogonal()
-        } else {
-            self.normalize()
-        };
+    /// This swaps the bra and ket components and applies conjugation to each.
+    pub fn dag(self) -> Self {
+        Self {
+            ket: self.bra.conj(),
+            bra: self.ket.conj(),
+        }
+    }
+    /// Returns the trace of a general rank-1 matrix that is neither a projector nor nilpotent, as a `Cpx<T>`.
+    pub fn trace(self) -> Cpx<T> {
+        let NormPair { c0: k0, c1: k1 } = self.ket;
+        let NormPair { c0: b0, c1: b1 } = self.bra;
 
-        match state {
-            Self::Null => None,
-            Self::Ket { .. } => Some(Projector {
-                scalar: ONE,
-                ket: state,
-            }),
-            Self::Bra { .. } => Some(Projector {
-                scalar: ONE,
-                ket: state.dag(),
-            }),
-        }
+        Cpx::Real { re: k0 * b0 } + k1 * b1
     }
 }
-impl Projector {
-    /// Regularize the projector to a standard representation.
-    pub fn regularize(&self) -> Self {
-        let mut new_ket = self.ket.regularize();
-        let new_scalar = self.scalar * new_ket.phase();
-        new_ket = new_ket.normalize();
-        Projector {
-            scalar: new_scalar,
-            ket: new_ket,
+
+impl<T: FloatExt + Hash> Rank1<T> {
+    /// Factors out amplitude and optional global phase from a rank-1 operator.
+    ///
+    /// - Returns `None` if underlying state(s) are zero.
+    /// - `Some(( canonical, prob, phase_opt))` where:
+    ///   - `canonical` is normalized (projector or outer product),
+    ///   - `prob` is the total scalar amplitude (squared norm),
+    ///   - `phase_opt` is `Some(phase)` for `Other`, `None` for `ProNil`.
+    pub fn try_factor_out(self) -> Option<(Self, T, Option<Cpx<T>>)> {
+        match self {
+            Self::ProNil(pn) => pn
+                .try_factor_out()
+                .map(|(canon, prob)| (Self::ProNil(canon), prob, None)),
+            Self::Other(other) => other
+                .try_factor_out()
+                .map(|(canon, prob, phase)| (Self::Other(canon), prob, Some(phase))),
         }
-    }
-    /// Normalize the projector to a standard representation.
-    pub fn normalize(&self) -> Self {
-        Projector {
-            scalar: ONE,
-            ket: self.ket.normalize(),
-        }
-    }
-    /// Convert the projector into a [[Cpx; 2]; 2] form.
-    pub fn to_mat(self) -> [[Cpx; 2]; 2] {
-        let regularized = self.regularize();
-        let r0 = regularized.ket.c0();
-        let r1 = regularized.ket.c1();
-        let s = regularized.scalar;
-        let c0 = r0.conj();
-        let c1 = r1.conj();
-        [[s * r0 * c0, s * r0 * c1], [s * r1 * c0, s * r1 * c1]]
-    }
-    /// Take trace of this projector.
-    pub fn tr(&self) -> Cpx {
-        let regularized = self.regularize();
-        let r0 = regularized.ket.c0();
-        let r1 = regularized.ket.c1();
-        let s = regularized.scalar;
-        let c0 = r0.conj();
-        let c1 = r1.conj();
-        s * (r0 * c0 + r1 * c1)
-    }
-    /// Take dag of this projector.
-    pub fn dag(&self) -> Self {
-        Projector {
-            scalar: self.scalar.conj(),
-            ket: self.ket,
-        }
-    }
-    /// Convert this projector into its complement.
-    pub fn not(&self) -> Self {
-        let regularized = self.regularize();
-        Projector {
-            scalar: regularized.scalar,
-            ket: regularized.ket.orthogonal(),
-        }
-    }
-    /// Check if this is indeed a null matrix.
-    pub fn is_zero(&self) -> bool {
-        self.regularize().scalar.is_zero()
-    }
-}
-impl Nilpotent {
-    /// Regularize the nilpotent matrix to a standard representation.
-    pub fn regularize(&self) -> Self {
-        let mut new_ket = self.ket.regularize();
-        let new_scalar = self.scalar * new_ket.phase();
-        new_ket = new_ket.normalize();
-        Nilpotent {
-            scalar: new_scalar,
-            ket: new_ket,
-        }
-    }
-    /// Normalize the nilpotent matrix to a standard representation.
-    pub fn normalize(&self) -> Self {
-        Nilpotent {
-            scalar: ONE,
-            ket: self.ket.normalize(),
-        }
-    }
-    /// Convert the nilpotent matrix into a [[Cpx; 2]; 2] form.
-    pub fn to_mat(self) -> [[Cpx; 2]; 2] {
-        let regularized = self.regularize();
-        let r0 = regularized.ket.c0();
-        let r1 = regularized.ket.c1();
-        let s = regularized.scalar;
-        let c0 = r1.conj();
-        let c1 = -r0.conj();
-        [[s * r0 * c0, s * r0 * c1], [s * r1 * c0, s * r1 * c1]]
-    }
-    /// Take trace of this nilpotent matrix.
-    pub fn tr(&self) -> Cpx {
-        let regularized = self.regularize();
-        let r0 = regularized.ket.c0();
-        let r1 = regularized.ket.c1();
-        let s = regularized.scalar;
-        let c0 = r1.conj();
-        let c1 = -r0.conj();
-        s * (r0 * c0 + r1 * c1)
-    }
-    /// Take dag of this nilpotent matrix.
-    pub fn dag(&self) -> Self {
-        let regularized = self.regularize();
-        let new_ket = State::Ket {
-            c0: regularized.ket.c1(),
-            c1: -regularized.ket.c0(),
-            phase: regularized.ket.phase(),
-        }
-        .normalize();
-        Nilpotent {
-            scalar: regularized.scalar.conj(),
-            ket: new_ket,
-        }
-    }
-    /// Convert this nilpotent matrix into its complement.
-    pub fn not(&self) -> Self {
-        let regularized = self.regularize();
-        Nilpotent {
-            scalar: regularized.scalar,
-            ket: regularized.ket.orthogonal(),
-        }
-    }
-    /// Check if this matrix is indeed null.
-    pub fn is_zero(&self) -> bool {
-        self.regularize().scalar.is_zero()
-    }
-}
-impl Rank1 {
-    /// Regularizes the rank-1 matrix to a standard representation.
-    pub fn regularize(&self) -> Self {
-        let mut new_ket = self.ket.regularize();
-        let mut new_bra = self.bra.regularize();
-        let new_scalar = self.scalar * new_ket.phase() * new_bra.phase();
-        new_ket = new_ket.normalize();
-        new_bra = new_bra.normalize();
-        Rank1 {
-            scalar: new_scalar.regularize(),
-            ket: new_ket,
-            bra: new_bra,
-        }
-    }
-    /// Normalizes the rank-1 matrix by setting the scalar to one.
-    pub fn normalize(&self) -> Self {
-        Rank1 {
-            scalar: ONE,
-            ket: self.ket.normalize(),
-            bra: self.bra.normalize(),
-        }
-    }
-    /// Converts this rank-1 operator into a full 2×2 matrix representation.
-    pub fn to_mat(self) -> [[Cpx; 2]; 2] {
-        let regularized = self.regularize();
-        let r0 = regularized.ket.c0();
-        let r1 = regularized.ket.c1();
-        let c0 = regularized.bra.c0();
-        let c1 = regularized.bra.c1();
-        let s = regularized.scalar;
-        [[s * r0 * c0, s * r0 * c1], [s * r1 * c0, s * r1 * c1]]
-    }
-    /// Returns the trace of the rank-1 matrix.
-    pub fn tr(&self) -> Cpx {
-        let regularized = self.regularize();
-        let r0 = regularized.ket.c0();
-        let r1 = regularized.ket.c1();
-        let c0 = regularized.bra.c0();
-        let c1 = regularized.bra.c1();
-        let s = regularized.scalar;
-        s * (r0 * c0 + r1 * c1)
     }
     /// Returns the Hermitian conjugate (dagger) of the rank-1 matrix.
-    pub fn dag(&self) -> Self {
-        let regularized = self.regularize();
-        Rank1 {
-            scalar: regularized.scalar.conj(),
-            ket: regularized.bra.dag(),
-            bra: regularized.ket.dag(),
+    ///
+    /// For `ProNil`, the projector is preserved and the nilpotent vector is conjugated if applicable.
+    /// For `Other`, the ket and bra are swapped and conjugated.
+    pub fn dag(self) -> Self {
+        match self {
+            Rank1::ProNil(pn) => Rank1::ProNil(pn.dag()),
+            Rank1::Other(other) => Rank1::Other(other.dag()),
         }
     }
-    /// Returns the orthogonal complement of the rank-1 matrix.
-    pub fn not(&self) -> Self {
-        let regularized = self.regularize();
-        Rank1 {
-            scalar: regularized.scalar,
-            ket: regularized.ket.orthogonal(),
-            bra: regularized.bra.orthogonal(),
-        }
-    }
-    /// Checks whether this rank-1 matrix is the zero operator.
-    pub fn is_zero(&self) -> bool {
-        self.regularize().scalar.is_zero()
-    }
-}
-impl Pauli {
-    /// Converts this Pauli matrix into its full 2×2 matrix form.
-    pub fn to_mat(self) -> [[Cpx; 2]; 2] {
-        match &self.idx {
-            0 => [[self.scalar, ZERO], [ZERO, self.scalar]],
-            1 => [[ZERO, self.scalar], [self.scalar, ZERO]],
-            2 => [[ZERO, -J * self.scalar], [J * self.scalar, ZERO]],
-            3 => [[self.scalar, ZERO], [ZERO, -self.scalar]],
-            _ => panic!("Invalid input pauli index."),
+    /// Returns the trace of a general rank-1 matrix as a `Cpx<T>`.
+    pub fn trace(self) -> Cpx<T> {
+        match self {
+            Rank1::ProNil(pn) => pn.trace(),
+            Rank1::Other(other) => other.trace(),
         }
     }
 }
-impl Rank2SVD {
-    /// Regularizes the rank-2 matrix to a canonical form by normalizing states, absorbing phases into singular values, and collapsing linearly dependent components.
-    pub fn regularize(&self) -> Self {
-        match (self.u1, self.u2, self.v1, self.v2) {
-            (State::Ket { .. }, State::Ket { .. }, State::Bra { .. }, State::Bra { .. }) => {
-                let mut new_u1 = self.u1.regularize();
-                let mut new_u2 = self.u2.regularize();
-                let mut new_v1 = self.v1.regularize();
-                let mut new_v2 = self.v2.regularize();
-                let mut sigma1 = self.sigma1 * new_u1.phase() * new_v1.phase();
-                let sigma2 = self.sigma2 * new_u2.phase() * new_v2.phase();
-                new_u1 = new_u1.normalize();
-                new_u2 = new_u2.normalize();
-                new_v1 = new_v1.normalize();
-                new_v2 = new_v2.normalize();
-                if new_u1 == new_u2 {
-                    new_v1 = (new_v1 * sigma1 + new_v2 * sigma2).regularize();
-                    sigma1 = new_v1.phase();
-                    new_v1 = new_v1.normalize();
-                    Rank2SVD {
-                        sigma1,
-                        sigma2: ZERO,
-                        u1: new_u1,
-                        u2: State::Null,
-                        v1: new_v1,
-                        v2: State::Null,
-                    }
-                } else if new_v1 == new_v2 {
-                    new_u1 = (new_u1 * sigma1 + new_u2 * sigma2).regularize();
-                    sigma1 = new_u1.phase();
-                    new_u1 = new_u1.normalize();
-                    Rank2SVD {
-                        sigma1,
-                        sigma2: ZERO,
-                        u1: new_u1,
-                        u2: State::Null,
-                        v1: new_v1,
-                        v2: State::Null,
-                    }
-                } else {
-                    Rank2SVD {
-                        sigma1,
-                        sigma2,
-                        u1: new_u1,
-                        u2: new_u2,
-                        v1: new_v1,
-                        v2: new_v2,
-                    }
+
+impl<T: FloatExt + Hash> RawMat<T> {
+    /// Constructs a raw 2×2 complex matrix from a rank-1 representation.
+    ///
+    /// Computes the outer product `|ket⟩⟨bra|`, with `ket` and `bra` derived from
+    /// either a projector/nilpotent pairing or explicit components.
+    pub fn from_rank1(rk1: Rank1<T>) -> Self {
+        let build_outer = |k0: Cpx<T>, k1: Cpx<T>, b0: Cpx<T>, b1: Cpx<T>| RawMat {
+            mat: [[k0 * b0, k0 * b1], [k1 * b0, k1 * b1]],
+        };
+
+        let (ket, bra) = match rk1 {
+            Rank1::ProNil(pn) => {
+                let dual = pn.norm_pair.conj();
+                let dual_out = match pn.pro_nil {
+                    Projector => dual,
+                    Nilpotent => dual.orthogonal(),
+                };
+                match pn.bra_ket {
+                    Ket => (pn.norm_pair, dual_out),
+                    Bra => (dual_out, pn.norm_pair),
                 }
             }
-            (State::Null, State::Null, State::Null, State::Null) => Rank2SVD {
-                sigma1: ZERO,
-                sigma2: ZERO,
-                u1: State::Null,
-                u2: State::Null,
-                v1: State::Null,
-                v2: State::Null,
-            },
-            _ => panic!("Invalid input."),
+            Rank1::Other(other) => (other.ket, other.bra),
+        };
+
+        build_outer(
+            Cpx::Real { re: ket.c0 },
+            ket.c1,
+            Cpx::Real { re: bra.c0 },
+            bra.c1,
+        )
+    }
+
+    /// Constructs a raw 2×2 matrix representing the density matrix of a mixed qubit state.
+    ///
+    /// The result is a convex combination of projectors onto a qubit and its orthogonal complement:
+    /// ρ = `prob` × |ψ⟩⟨ψ| + (1 − `prob`) × |ψ⊥⟩⟨ψ⊥|.
+    pub fn from_mixed_qubit(mixed: MixQubit<T>) -> Self {
+        let prob = mixed.mix_pair.prob;
+        let comp_prob = T::one() - prob;
+        let norm = mixed.mix_pair.norm_pair;
+        let bra_ket = mixed.bra_ket;
+
+        let mk_proj = |norm_pair| {
+            Self::from_rank1(Rank1::ProNil(Rk1PN {
+                bra_ket,
+                norm_pair,
+                pro_nil: Projector,
+            }))
+        };
+
+        let rho1 = mk_proj(norm) * prob;
+        let rho2 = mk_proj(norm.orthogonal()) * comp_prob;
+
+        rho1 + rho2
+    }
+
+    /// Converts a (complex) quaternion in the Pauli basis back into a raw 2×2 complex matrix.
+    ///
+    /// The complex quaternion is of the form:  
+    /// `M = c₀·I + c₁·X + c₂·Y + c₃·Z`, where `coefficients = [c₀, c₁, c₂, c₃]`.
+    pub fn from_cpx_quaternion(cq: CpxQuaternion<T>) -> Self {
+        let [c0, c1, c2, c3] = cq.coefficients;
+        let mat = [[c0 + c3, c1 - c2 * Cpx::J], [c1 + c2 * Cpx::J, c0 - c3]];
+        Self { mat }
+    }
+
+    /// Converts a (real) quaternion in the Pauli basis back into a raw 2×2 complex matrix.
+    ///
+    /// The real quaternion is of the form:  
+    /// `M = r₀·I + r₁·X + r₂·Y + r₃·Z`, where `coefficients = [r₀, r₁, r₂, r₃]`.
+    pub fn from_real_quaternion(rq: RealQuaternion<T>) -> Self {
+        Self::from_cpx_quaternion(CpxQuaternion::from_real_quaternion(rq))
+    }
+
+    /// Converts a unit-determinant complex quaternion into a raw 2×2 matrix.
+    ///
+    /// Computes the implicit identity coefficient `a₀` to satisfy `det(M) = 1`,
+    /// then reconstructs the matrix from the full Pauli decomposition.
+    pub fn from_det1_cpx_quaternion(d1cq: Det1CpxQuaternion<T>) -> Self {
+        Self::from_cpx_quaternion(CpxQuaternion::from_det1_cpx_quaternion(d1cq))
+    }
+
+    /// Converts a unit-determinant real quaternion into a raw 2×2 matrix.
+    ///
+    /// Internally lifts the real coefficients into the complex domain and reconstructs
+    /// the full matrix while enforcing the unit-determinant constraint.
+    pub fn from_det1_real_quaternion(d1rq: Det1RealQuaternion<T>) -> Self {
+        Self::from_real_quaternion(RealQuaternion::from_det1_real_quaternion(d1rq))
+    }
+
+    /// Returns the Hermitian conjugate (dagger) of the Raw matrix representation.
+    pub fn dag(self) -> Self {
+        let m = self.mat;
+        Self {
+            mat: [
+                [m[0][0].conj(), m[1][0].conj()],
+                [m[0][1].conj(), m[1][1].conj()],
+            ],
         }
+    }
+    /// Returns the trace of a raw matrix as a `Cpx<T>`.
+    pub fn trace(self) -> Cpx<T> {
+        let m = self.mat;
+        m[0][0] + m[1][1]
     }
     /// Returns the determinant of the matrix.
-    pub fn det(&self) -> Cpx {
-        let s = self.regularize();
-        s.sigma1 * s.sigma2
+    pub fn det(self) -> Cpx<T> {
+        let m = self.mat;
+        (m[0][0] * m[1][1]) - (m[0][1] * m[1][0])
     }
-    /// Converts this matrix into a 2×2 form: σ₁ u₁v₁† + σ₂ u₂v₂†.
-    pub fn to_mat(self) -> [[Cpx; 2]; 2] {
-        let m1 = Rank1 {
-            scalar: self.sigma1,
-            ket: self.u1,
-            bra: self.v1,
-        }
-        .to_mat();
-        let m2 = Rank1 {
-            scalar: self.sigma2,
-            ket: self.u2,
-            bra: self.v2,
-        }
-        .to_mat();
-        [
-            [m1[0][0] + m2[0][0], m1[0][1] + m2[0][1]],
-            [m1[1][0] + m2[1][0], m1[1][1] + m2[1][1]],
-        ]
-    }
-    /// Returns the trace of the matrix.
-    pub fn tr(&self) -> Cpx {
-        let mat = &self.to_mat();
-        mat[0][0] + mat[1][1]
-    }
-    /// Checks whether this matrix is the zero operator.
+    /// Returns `true` if all entries of the matrix are zero.
     pub fn is_zero(&self) -> bool {
-        let s = self.regularize();
-        s.sigma1.is_zero() && s.sigma2.is_zero()
+        self.mat.iter().flatten().all(|c| matches!(c, Cpx::Zero {}))
     }
     /// Returns the rank of the matrix (0, 1, or 2).
     pub fn rank(&self) -> u8 {
         if self.is_zero() {
             0
-        } else if self.det().is_zero() {
+        } else if matches!(self.det(), Cpx::Zero {}) {
             1
         } else {
             2
         }
     }
-    /// Extracts the coefficient of the identity component.
-    pub fn get_i(&self) -> Cpx {
-        let mat = &self.to_mat();
-        (mat[0][0] + mat[1][1]) / 2.0
+}
+
+impl<T: FloatExt + Hash> CpxQuaternion<T> {
+    /// Constructs a Pauli-basis (cpx-quaternion) representation from a raw 2×2 complex matrix.
+    ///
+    /// Decomposes the matrix `M` into the Pauli basis:  
+    /// `M = a₀·I + a₁·X + a₂·Y + a₃·Z`,  
+    /// where `a₀ = (M₀₀ + M₁₁)/2`, `a₁ = (M₀₁ + M₁₀)/2`, etc.
+    pub fn from_raw_mat(raw: RawMat<T>) -> Self {
+        let half = T::from(0.5).unwrap();
+        let [[a, b], [c, d]] = raw.mat;
+
+        let coefficients = [
+            (a + d) * half,          // I component
+            (b + c) * half,          // X component
+            (b - c) * half * Cpx::J, // Y component
+            (a - d) * half,          // Z component
+        ];
+
+        Self { coefficients }
     }
-    /// Extracts the coefficient of the Pauli-X component.
-    pub fn get_x(&self) -> Cpx {
-        let mat = &self.to_mat();
-        (mat[0][1] + mat[1][0]) / 2.0
+
+    /// Constructs a Pauli-basis (cpx-quaternion) representation from a Hermitian 2×2 matrix.
+    pub fn from_real_quaternion(rq: RealQuaternion<T>) -> Self {
+        let mut coefficients = [Cpx::ZERO; 4];
+        for (i, &real) in rq.coefficients.iter().enumerate() {
+            coefficients[i] = Cpx::Real { re: real };
+        }
+        Self { coefficients }
     }
-    /// Extracts the coefficient of the Pauli-Y component.
-    pub fn get_y(&self) -> Cpx {
-        let mat = &self.to_mat();
-        (mat[0][1] - mat[1][0]) / 2.0 * J
+
+    /// Constructs a `CpxQuaternion` from a `Det1CpxQuaternion`, computing the identity coefficient
+    /// to satisfy `det(M) = 1` under the Pauli basis expansion.
+    pub fn from_det1_cpx_quaternion(d1cq: Det1CpxQuaternion<T>) -> Self {
+        let x2 = d1cq.x.powi(2);
+        let y2 = d1cq.y.powi(2);
+        let z2 = d1cq.z.powi(2);
+
+        let a0 = (x2 + y2 + z2 + Cpx::ONE).powf(T::from(0.5).unwrap()); // a₀ = sqrt(1 + x² + y² + z²)
+
+        let coefficients = [a0, d1cq.x, d1cq.y, d1cq.z];
+        Self { coefficients }
     }
-    /// Extracts the coefficient of the Pauli-Z component.
-    pub fn get_z(&self) -> Cpx {
-        let mat = &self.to_mat();
-        (mat[0][0] - mat[1][1]) / 2.0
+
+    /// Counts how many coefficients are not the `Cpx::Zero` variant.
+    ///
+    /// Assumes zeros are exactly represented by `Cpx::Zero {}`.
+    pub fn nonzero_count(&self) -> usize {
+        self.coefficients
+            .iter()
+            .filter(|c| !matches!(c, Cpx::Zero {}))
+            .count()
     }
-    /// Checks whether this matrix is a Pauli matrix.
-    pub fn is_pauli(&self) -> bool {
-        let b0 = !self.get_i().is_zero();
-        let b1 = !self.get_x().is_zero();
-        let b2 = !self.get_y().is_zero();
-        let b3 = !self.get_z().is_zero();
-        let count_nonzero = [b0, b1, b2, b3].iter().filter(|&&x| x).count(); // Count only `true` values
-        count_nonzero == 1
+
+    /// Checks whether this matrix is an identity matrix or a Pauli matrix.
+    pub fn is_ixyz(&self) -> bool {
+        self.nonzero_count() == 1
+    }
+
+    /// Returns the Hermitian conjugate (dagger) of the cpx-quaternion representation.
+    pub fn dag(&self) -> Self {
+        let mut coefficients = self.coefficients;
+        for elem in &mut coefficients {
+            *elem = elem.conj();
+        }
+        Self { coefficients }
+    }
+
+    /// Returns the trace of the cpx-quaternion representation as a `Cpx<T>`.
+    pub fn trace(&self) -> Cpx<T> {
+        self.coefficients[0] * T::from(2.0).unwrap()
+    }
+
+    /// Computes the determinant of the matrix represented by this quaternion:
+    /// det(M) = (a₀)² − (a₁)² − (a₂)² − (a₃)², where M = a₀·I + a₁·X + a₂·Y + a₃·Z.
+    pub fn det(&self) -> Cpx<T> {
+        let [a0, a1, a2, a3] = self.coefficients;
+        a0.powi(2) - a1.powi(2) - a2.powi(2) - a3.powi(2)
     }
 }
-impl AltMat {
-    /// Regularizes the classified complex 2×2 matrix to a standard representation.
-    pub fn regularize(&self) -> Self {
+
+impl<T: FloatExt + Hash> RealQuaternion<T> {
+    /// Constructs a `RealQuaternion` from a `Det1RealQuaternion`, computing the identity coefficient
+    /// to satisfy `det(M) = 1` under the Pauli basis expansion.
+    pub fn from_det1_real_quaternion(d1rq: Det1RealQuaternion<T>) -> Self {
+        let x2 = d1rq.x.powi(2);
+        let y2 = d1rq.y.powi(2);
+        let z2 = d1rq.z.powi(2);
+
+        let a0 = (x2 + y2 + z2 + T::one()).sqrt(); // a₀ = sqrt(1 + x² + y² + z²)
+
+        let coefficients = [a0, d1rq.x, d1rq.y, d1rq.z];
+        Self { coefficients }
+    }
+
+    /// Counts how many coefficients are not the `T::zero()` variant.
+    ///
+    /// Assumes zeros are exactly represented by `T::zero()`.
+    pub fn nonzero_count(&self) -> usize {
+        self.coefficients
+            .iter()
+            .filter(|c| **c != T::zero())
+            .count()
+    }
+    /// Checks whether this matrix is an identity matrix or a Pauli matrix.
+    pub fn is_ixyz(&self) -> bool {
+        self.nonzero_count() == 1
+    }
+    /// Returns the trace of the real-quaternion representation as a `T`.
+    pub fn trace(&self) -> T {
+        self.coefficients[0] * T::from(2.0).unwrap()
+    }
+
+    /// Computes the determinant of the matrix represented by this real quaternion:
+    /// det(M) = (a₀)² − (a₁)² − (a₂)² − (a₃)², where M = a₀·I + a₁·X + a₂·Y + a₃·Z.
+    pub fn det(&self) -> T {
+        let [a0, a1, a2, a3] = self.coefficients;
+        a0.powi(2) - a1.powi(2) - a2.powi(2) - a3.powi(2)
+    }
+}
+
+impl<T: FloatExt + Hash> Det1CpxQuaternion<T> {
+    /// Constructs a `Det1CpxQuaternion` from a `Det1RealQuaternion`, lifting real components
+    /// into the complex domain while preserving the determinant-1 constraint.
+    pub fn from_real(d1rq: Det1RealQuaternion<T>) -> Self {
+        Self {
+            x: Cpx::Real { re: d1rq.x },
+            y: Cpx::Real { re: d1rq.y },
+            z: Cpx::Real { re: d1rq.z },
+        }
+    }
+
+    /// Returns the implicit identity component `a₀` such that:
+    /// `a₀ = sqrt(1 + x² + y² + z²)`, ensuring `det(M) = 1`.
+    pub fn a0(&self) -> Cpx<T> {
+        (Cpx::ONE + self.x.powi(2) + self.y.powi(2) + self.z.powi(2)).powf(T::from(0.5).unwrap())
+    }
+
+    /// Returns the Hermitian conjugate (dagger) of the cpx-quaternion representation with unit determinant.
+    pub fn dag(&self) -> Self {
+        let x = self.x.conj();
+        let y = self.y.conj();
+        let z = self.z.conj();
+        Self { x, y, z }
+    }
+
+    /// Returns the trace of the corresponding 2×2 matrix, which is `2·a₀`.
+    pub fn trace(&self) -> Cpx<T> {
+        self.a0() * T::from(2.0).unwrap()
+    }
+
+    /// Checks whether this matrix is an identity matrix or a Pauli matrix.
+    pub fn is_ixyz(self) -> bool {
+        CpxQuaternion::from_det1_cpx_quaternion(self).nonzero_count() == 1
+    }
+}
+
+impl<T: FloatExt + Hash> Det1RealQuaternion<T> {
+    /// Returns the implicit identity component `a₀` such that:
+    /// `a₀ = sqrt(1 + x² + y² + z²)`, ensuring `det(M) = 1`.
+    pub fn a0(&self) -> T {
+        (T::one() + self.x.powi(2) + self.y.powi(2) + self.z.powi(2)).powf(T::from(0.5).unwrap())
+    }
+
+    /// Returns the trace of the corresponding 2×2 matrix, which is `2·a₀`.
+    pub fn trace(&self) -> T {
+        self.a0() * T::from(2.0).unwrap()
+    }
+
+    /// Checks whether this matrix is an identity matrix or a Pauli matrix.
+    pub fn is_ixyz(self) -> bool {
+        RealQuaternion::from_det1_real_quaternion(self).nonzero_count() == 1
+    }
+}
+
+impl<T: FloatExt + Hash> Det1<T> {
+    /// Returns the trace of the matrix: `tr(M) = 2·a₀`, where `a₀` is the identity component.
+    pub fn trace(&self) -> Cpx<T> {
         match self {
-            Self::Rank0 => Self::Rank0,
-            Self::Projector { projector } => Self::Projector {
-                projector: projector.regularize(),
-            },
-            Self::Nilpotent { nilpotent } => Self::Nilpotent {
-                nilpotent: nilpotent.regularize(),
-            },
-            Self::Rank1 { rank1 } => {
-                if rank1.is_zero() {
-                    Self::Rank0
-                } else {
-                    let regularized = rank1.regularize();
-                    if regularized.ket == regularized.bra.dag() {
-                        Self::Projector {
-                            projector: Projector {
-                                scalar: regularized.scalar,
-                                ket: regularized.ket,
-                            },
-                        }
-                    } else if regularized.bra.inner(&regularized.ket).is_zero() {
-                        Self::Nilpotent {
-                            nilpotent: Nilpotent {
-                                scalar: regularized.scalar,
-                                ket: regularized.ket,
-                            },
-                        }
-                    } else {
-                        Self::Rank1 { rank1: *rank1 }
-                    }
-                }
-            }
-            Self::Pauli { pauli } => Self::Pauli { pauli: *pauli },
-            Self::Rank2SVD { rank2 } => {
-                if rank2.is_zero() {
-                    Self::Rank0
-                } else if !rank2.det().is_zero() && !rank2.is_pauli() {
-                    Self::Rank2SVD { rank2: *rank2 }.regularize()
-                } else if !rank2.det().is_zero() && rank2.is_pauli() {
-                    let c0 = rank2.get_i().regularize();
-                    let c1 = rank2.get_x().regularize();
-                    let c2 = rank2.get_y().regularize();
-                    let c3 = rank2.get_z().regularize();
-                    match (c0.is_zero(), c1.is_zero(), c2.is_zero()) {
-                        (false, _, _) => Self::Pauli {
-                            pauli: Pauli { idx: 0, scalar: c0 },
-                        },
-                        (true, false, _) => Self::Pauli {
-                            pauli: Pauli { idx: 1, scalar: c1 },
-                        },
-                        (true, true, false) => Self::Pauli {
-                            pauli: Pauli { idx: 2, scalar: c2 },
-                        },
-                        (true, true, true) => Self::Pauli {
-                            pauli: Pauli { idx: 3, scalar: c3 },
-                        },
-                    }
-                } else {
-                    let mat = rank2.to_mat();
-                    let b00: bool = mat[0][0].is_zero();
-                    let b01: bool = mat[0][1].is_zero();
-                    let b10: bool = mat[1][0].is_zero();
-                    let b11: bool = mat[1][1].is_zero();
-
-                    let bu0: bool = b00 && b01;
-                    let bu1: bool = b10 && b11;
-                    let bv0: bool = b00 && b10;
-                    let bv1: bool = b01 && b11;
-
-                    if bu0 {
-                        let new_ket = State::Ket {
-                            c0: ZERO,
-                            c1: ONE,
-                            phase: ONE,
-                        };
-                        let mut new_bra = State::Bra {
-                            c0: mat[1][0],
-                            c1: mat[1][1],
-                            phase: ONE,
-                        }
-                        .regularize();
-                        let new_scalar = new_bra.phase();
-                        new_bra = new_bra.normalize();
-                        if new_bra == new_ket.dag() {
-                            Self::Projector {
-                                projector: Projector {
-                                    scalar: new_scalar,
-                                    ket: new_ket,
-                                },
-                            }
-                        } else if new_bra.inner(&new_ket).is_zero() {
-                            Self::Nilpotent {
-                                nilpotent: Nilpotent {
-                                    scalar: new_scalar,
-                                    ket: new_ket,
-                                },
-                            }
-                        } else {
-                            Self::Rank1 {
-                                rank1: Rank1 {
-                                    scalar: new_scalar,
-                                    ket: new_ket,
-                                    bra: new_bra,
-                                },
-                            }
-                        }
-                    } else if bu1 {
-                        let new_ket = State::Ket {
-                            c0: ONE,
-                            c1: ZERO,
-                            phase: ONE,
-                        };
-                        let mut new_bra = State::Bra {
-                            c0: mat[0][0],
-                            c1: mat[0][1],
-                            phase: ONE,
-                        }
-                        .regularize();
-                        let new_scalar = new_bra.phase();
-                        new_bra = new_bra.normalize();
-                        if new_bra == new_ket.dag() {
-                            Self::Projector {
-                                projector: Projector {
-                                    scalar: new_scalar,
-                                    ket: new_ket,
-                                },
-                            }
-                        } else if new_bra.inner(&new_ket).is_zero() {
-                            Self::Nilpotent {
-                                nilpotent: Nilpotent {
-                                    scalar: new_scalar,
-                                    ket: new_ket,
-                                },
-                            }
-                        } else {
-                            Self::Rank1 {
-                                rank1: Rank1 {
-                                    scalar: new_scalar,
-                                    ket: new_ket,
-                                    bra: new_bra,
-                                },
-                            }
-                        }
-                    } else if bv0 {
-                        let new_bra = State::Bra {
-                            c0: ZERO,
-                            c1: ONE,
-                            phase: ONE,
-                        };
-                        let mut new_ket = State::Ket {
-                            c0: mat[0][1],
-                            c1: mat[1][1],
-                            phase: ONE,
-                        }
-                        .regularize();
-                        let new_scalar = new_ket.phase();
-                        new_ket = new_ket.normalize();
-                        if new_ket == new_bra.dag() {
-                            Self::Projector {
-                                projector: Projector {
-                                    scalar: new_scalar,
-                                    ket: new_ket,
-                                },
-                            }
-                        } else if new_bra.dag().inner(&new_ket).is_zero() {
-                            Self::Nilpotent {
-                                nilpotent: Nilpotent {
-                                    scalar: new_scalar,
-                                    ket: new_ket,
-                                },
-                            }
-                        } else {
-                            Self::Rank1 {
-                                rank1: Rank1 {
-                                    scalar: new_scalar,
-                                    ket: new_ket,
-                                    bra: new_bra,
-                                },
-                            }
-                        }
-                    } else if bv1 {
-                        let new_bra = State::Bra {
-                            c0: ONE,
-                            c1: ZERO,
-                            phase: ONE,
-                        };
-                        let mut new_ket = State::Ket {
-                            c0: mat[0][0],
-                            c1: mat[1][0],
-                            phase: ONE,
-                        }
-                        .regularize();
-                        let new_scalar = new_ket.phase();
-                        new_ket = new_ket.normalize();
-                        if new_ket == new_bra.dag() {
-                            Self::Projector {
-                                projector: Projector {
-                                    scalar: new_scalar,
-                                    ket: new_ket,
-                                },
-                            }
-                        } else if new_bra.dag().inner(&new_ket).is_zero() {
-                            Self::Nilpotent {
-                                nilpotent: Nilpotent {
-                                    scalar: new_scalar,
-                                    ket: new_ket,
-                                },
-                            }
-                        } else {
-                            Self::Rank1 {
-                                rank1: Rank1 {
-                                    scalar: new_scalar,
-                                    ket: new_ket,
-                                    bra: new_bra,
-                                },
-                            }
-                        }
-                    } else {
-                        let frac_u1_u0 = mat[1][0] / mat[0][0];
-                        let frac_v1_v0 = mat[0][1] / mat[0][0];
-                        let mut new_ket = State::Ket {
-                            c0: ONE,
-                            c1: frac_u1_u0,
-                            phase: ONE,
-                        }
-                        .regularize();
-                        let mut new_bra = State::Bra {
-                            c0: ONE,
-                            c1: frac_v1_v0,
-                            phase: ONE,
-                        }
-                        .regularize();
-                        let new_scalar = mat[0][0] * new_ket.phase() * new_bra.phase();
-                        new_ket = new_ket.normalize();
-                        new_bra = new_bra.normalize();
-                        if new_ket == new_bra.dag() {
-                            Self::Projector {
-                                projector: Projector {
-                                    scalar: new_scalar,
-                                    ket: new_ket,
-                                },
-                            }
-                        } else if new_bra.dag().inner(&new_ket).is_zero() {
-                            Self::Nilpotent {
-                                nilpotent: Nilpotent {
-                                    scalar: new_scalar,
-                                    ket: new_ket,
-                                },
-                            }
-                        } else {
-                            Self::Rank1 {
-                                rank1: Rank1 {
-                                    scalar: new_scalar,
-                                    ket: new_ket,
-                                    bra: new_bra,
-                                },
-                            }
-                        }
-                    }
-                }
-            }
+            Self::Hermitian(d1rq) => Cpx::Real { re: d1rq.trace() },
+            Self::Other(d1cq) => d1cq.trace(),
         }
     }
-    /// Get the scalar of this matrix.
-    pub fn scalar(&self) -> Cpx {
+
+    /// Returns the Hermitian adjoint (dagger) of the matrix.
+    ///
+    /// For Hermitian matrices, this is the identity operation.
+    /// For non-Hermitian matrices, conjugates all Pauli coefficients.
+    pub fn dag(&self) -> Self {
         match self {
-            Self::Rank0 => ZERO,
-            Self::Projector { projector } => projector.regularize().scalar,
-            Self::Nilpotent { nilpotent } => nilpotent.regularize().scalar,
-            Self::Rank1 { rank1 } => rank1.regularize().scalar,
-            Self::Pauli { pauli } => pauli.scalar,
-            Self::Rank2SVD { rank2 } => rank2.det().sqrt(),
+            Self::Hermitian(d1rq) => Self::Hermitian(*d1rq),
+            Self::Other(d1cq) => Self::Other(d1cq.dag()),
         }
     }
-    /// Normalize this matrix.
-    pub fn normalize(&self) -> Self {
-        match self.scalar().inv() {
-            Ok(inv_scalar) => (*self * inv_scalar).regularize(),
-            Err(_) => {
-                eprintln!("Warning: Cannot normalize AltMat due to zero or invalid scalar.");
-                *self // Return the original AltMat if inversion fails
-            }
-        }
-    }
-    /// Check is this matrix is indeed an identity matrix up to a scalar.
-    pub fn is_id(&self) -> bool {
-        let normalized = self.normalize();
-        match normalized {
-            Self::Pauli { pauli } => pauli.idx == 0,
-            _ => false,
+
+    /// Returns `true` if the matrix is exactly one of `{I, X, Y, Z}`.
+    pub fn is_ixyz(self) -> bool {
+        match self {
+            Self::Hermitian(d1rq) => d1rq.is_ixyz(),
+            Self::Other(d1cq) => d1cq.is_ixyz(),
         }
     }
 }
 
-impl Hash for State {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        let regularized = self.regularize();
-        match regularized {
-            State::Null => 0u8.hash(state),
-            State::Ket { c0, c1, phase } => {
-                1u8.hash(state);
-                c0.hash(state);
-                c1.hash(state);
-                phase.hash(state);
-            }
-            State::Bra { c0, c1, phase } => {
-                2u8.hash(state);
-                c0.hash(state);
-                c1.hash(state);
-                phase.hash(state);
-            }
+impl<T: FloatExt + Hash> RankOneTwo<T> {
+    /// Returns the Hermitian conjugate (dagger) of the matrix.
+    pub fn dag(self) -> Self {
+        match self {
+            Self::Rank1(rk1) => Self::Rank1(rk1.dag()),
+            Self::Rank2(det1) => Self::Rank2(det1.dag()),
         }
     }
-}
-impl Hash for Projector {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        let regularized = self.regularize();
-        regularized.scalar.hash(state);
-        regularized.ket.hash(state);
+
+    /// Returns the trace of the matrix.
+    pub fn trace(self) -> Cpx<T> {
+        match self {
+            Self::Rank1(rk1) => rk1.trace(),
+            Self::Rank2(det1) => det1.trace(),
+        }
     }
-}
-impl Hash for Nilpotent {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        let regularized = self.regularize();
-        regularized.scalar.hash(state);
-        regularized.ket.hash(state);
+
+    /// Returns the determinant of the matrix.
+    pub fn det(self) -> Cpx<T> {
+        match self {
+            Self::Rank1(..) => Cpx::ZERO,
+            Self::Rank2(..) => Cpx::ONE,
+        }
     }
-}
-impl Hash for Rank1 {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        let regularized = self.regularize();
-        regularized.scalar.hash(state);
-        regularized.ket.hash(state);
-        regularized.bra.hash(state);
-    }
-}
-impl Hash for Pauli {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.idx.hash(state);
-        self.scalar.hash(state);
-    }
-}
-impl Hash for Rank2SVD {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        let regularized = self.regularize();
-        regularized.sigma1.hash(state);
-        regularized.sigma2.hash(state);
-        regularized.u1.hash(state);
-        regularized.u2.hash(state);
-        regularized.v1.hash(state);
-        regularized.v2.hash(state);
-    }
-}
-impl Hash for AltMat {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        let regularized = self.regularize();
-        match regularized {
-            AltMat::Rank0 => {
-                0u8.hash(state);
-            }
-            AltMat::Projector { projector } => {
-                1u8.hash(state);
-                projector.hash(state);
-            }
-            AltMat::Nilpotent { nilpotent } => {
-                2u8.hash(state);
-                nilpotent.hash(state);
-            }
-            AltMat::Rank1 { rank1 } => {
-                3u8.hash(state);
-                rank1.hash(state);
-            }
-            AltMat::Pauli { pauli } => {
-                4u8.hash(state);
-                pauli.hash(state);
-            }
-            AltMat::Rank2SVD { rank2 } => {
-                5u8.hash(state);
-                rank2.hash(state);
-            }
+
+    /// Returns the rank of this finite rank 2x2 matrix.
+    pub fn rank(self) -> usize {
+        match self {
+            Self::Rank1(..) => 1,
+            Self::Rank2(..) => 2,
         }
     }
 }
 
-impl Neg for State {
-    type Output = State;
-    fn neg(self) -> State {
-        let regularized = self.regularize();
-        match regularized {
-            Self::Null => Self::Null,
-            Self::Ket { c0, c1, phase } => Self::Ket {
-                c0,
-                c1,
-                phase: -phase,
-            },
-            Self::Bra { c0, c1, phase } => Self::Bra {
-                c0,
-                c1,
-                phase: -phase,
-            },
+impl<T: FloatExt + Hash> LocalOps<T> {
+    /// Returns the list of qubit indices that have explicitly assigned `RankOneTwo`.
+    pub fn indices_keys(&self) -> Vec<usize> {
+        self.idx_to_mat.keys().copied().collect()
+    }
+
+    /// Returns the inclusive interval of explicitly assigned qubit indices, if any.
+    ///
+    /// This is equivalent to `(min_index, max_index)` over the `idx_to_mix` map.
+    /// Returns `(None, None)` if the map is empty.
+    pub fn try_interval(&self) -> (Option<usize>, Option<usize>) {
+        let min = self.idx_to_mat.keys().next().copied();
+        let max = self.idx_to_mat.keys().next_back().copied();
+        (min, max)
+    }
+
+    /// Returns a new `LocalOps` with its interval adjusted to match the minimum and maximum keys
+    /// present in the `idx_to_mat` map.
+    ///
+    /// This method is useful for automatically syncing the `interval` field with the actual
+    /// span of explicitly defined qubit indices.
+    ///
+    /// # Returns
+    /// - `Some(Self)` with the updated interval if `idx_to_mat` is non-empty.
+    /// - `None` if `idx_to_mat` is empty, as there are no keys to determine an interval.
+    pub fn try_fit_interval(&self) -> Option<Self> {
+        let (min, max) = self.try_interval();
+        Some(Self {
+            interval: (min?, max?),
+            padding: self.padding,
+            idx_to_mat: self.idx_to_mat.clone(),
+        })
+    }
+
+    /// Returns a new `LocalOps` where all indices in the interval are explicitly filled.
+    ///
+    /// For any index within `self.interval` that does not appear in `idx_to_mat`, this method
+    /// inserts an entry with the `padding` value. The result is a fully populated BTreeMap with
+    /// no missing indices in the defined interval.
+    pub fn extract_padding(&self) -> Self {
+        let mut idx_to_mat = self.idx_to_mat.clone();
+        let (start, end) = self.interval;
+
+        for i in start..=end {
+            idx_to_mat.entry(i).or_insert(self.padding);
+        }
+
+        Self {
+            interval: self.interval,
+            padding: self.padding,
+            idx_to_mat,
+        }
+    }
+
+    /// Returns a new `LocalOps` with the specified interval, leaving all other fields unchanged.
+    ///
+    /// This method updates the `interval` field while cloning the existing `padding`
+    /// and `idx_to_mat` map.
+    pub fn set_interval(&self, interval: (usize, usize)) -> Self {
+        Self {
+            interval,
+            padding: self.padding,
+            idx_to_mat: self.idx_to_mat.clone(),
+        }
+    }
+
+    /// Returns a new `LocalOps` with the specified padding value,
+    /// leaving the interval and index-to-mat map unchanged.
+    pub fn set_padding(&self, padding: RankOneTwo<T>) -> Self {
+        Self {
+            interval: self.interval,
+            padding,
+            idx_to_mat: self.idx_to_mat.clone(),
+        }
+    }
+    /// Returns a new `LocalOps` with the specified indices removed from `idx_to_mat`.
+    ///
+    /// This method creates a copy of the current structure and removes any entries whose keys
+    /// match the provided indices. The original `interval` and `padding` are preserved.
+    ///
+    /// # Type Parameters
+    /// - `I`: An iterable collection of `usize` indices to remove.
+    ///
+    /// # Arguments
+    /// - `indices`: Any iterable over `usize` values (e.g., a `Vec`, array, range, or `HashSet`).
+    ///
+    /// # Returns
+    /// A new `LocalOps` with the specified indices removed from the map.
+    ///
+    /// # Examples
+    /// ```rust
+    /// //let pruned = original.discard(vec![1, 2, 4]);
+    /// //let pruned = original.discard([3, 5, 7]);
+    /// //let pruned = original.discard(0..=10);
+    /// ```
+    pub fn discard<I: IntoIterator<Item = usize>>(&self, indices: I) -> Self {
+        let mut new_map = self.idx_to_mat.clone();
+        for idx in indices {
+            new_map.remove(&idx);
+        }
+
+        Self {
+            interval: self.interval,
+            padding: self.padding,
+            idx_to_mat: new_map,
+        }
+    }
+    /// Returns a new `LocalOps` with additional entries merged into `idx_to_mat`.
+    ///
+    /// For each `(index, RankOneTwo<T>)` in the provided `idx_to_mat` map, if the index is not already present
+    /// in the current map, it is inserted. Existing entries are left unchanged.
+    ///
+    /// The resulting interval is updated to span the full range of indices in the combined map, unless the map
+    /// becomes empty, in which case the original interval is retained.
+    ///
+    /// # Arguments
+    ///
+    /// * `idx_to_mat` - A `BTreeMap<usize, RankOneTwo<T>>` containing new entries to insert.
+    ///
+    /// # Returns
+    ///
+    /// A new `LocalOps` with the merged map and updated interval.
+    pub fn extend(&self, idx_to_mat: BTreeMap<usize, RankOneTwo<T>>) -> Self {
+        let mut new_map = self.idx_to_mat.clone();
+        for (k, v) in idx_to_mat.iter() {
+            new_map.entry(*k).or_insert(*v);
+        }
+
+        let interval = key_interval_or(&new_map, self.interval);
+
+        Self {
+            interval,
+            padding: self.padding,
+            idx_to_mat: new_map,
+        }
+    }
+
+    /// Returns a new `LocalOps` with the given entries forcibly updated.
+    ///
+    /// For each `(index, RankOneTwo<T>)` in the provided map:
+    /// - Any existing entry at that index is removed.
+    /// - The new entry is inserted unconditionally.
+    ///
+    /// The updated `idx_to_mat` map reflects all changes, and the interval is recomputed to
+    /// span the full range of keys present in the new map (if non-empty).
+    ///
+    /// # Arguments
+    ///
+    /// * `idx_to_mat` - A `BTreeMap<usize, RankOneTwo<T>>` containing entries to overwrite.
+    ///
+    /// # Returns
+    ///
+    /// A new `LocalOps` with the forcibly updated entries and recalculated interval.
+    pub fn force_update(&self, idx_to_mat: BTreeMap<usize, RankOneTwo<T>>) -> Self {
+        let mut new_map = self.idx_to_mat.clone();
+
+        for (k, v) in idx_to_mat {
+            new_map.insert(k, v); // `insert` already replaces the value if key exists
+        }
+
+        let interval = key_interval_or(&new_map, self.interval);
+
+        Self {
+            interval,
+            padding: self.padding,
+            idx_to_mat: new_map,
+        }
+    }
+    /// Returns a new `LocalOps` with the values at two indices swapped.
+    ///
+    /// If both indices exist in `idx_to_mat`, their values are swapped.
+    /// If only one exists, its value is moved to the other index.
+    /// If neither exist, the mapping is unchanged.
+    ///
+    /// # Arguments
+    /// * `i` - The first index.
+    /// * `j` - The second index.
+    pub fn swap(&self, i: usize, j: usize) -> Self {
+        if i == j {
+            return self.clone(); // No-op
+        }
+
+        let mut new_map = self.idx_to_mat.clone();
+        swap_btree_entries(&mut new_map, i, j);
+
+        let interval = key_interval_or(&new_map, self.interval);
+
+        Self {
+            interval,
+            padding: self.padding,
+            idx_to_mat: new_map,
         }
     }
 }
-impl Neg for Projector {
-    type Output = Projector;
-    fn neg(self) -> Projector {
-        Projector {
-            scalar: -self.scalar,
-            ket: self.ket,
-        }
-    }
-}
-impl Neg for Nilpotent {
-    type Output = Nilpotent;
-    fn neg(self) -> Nilpotent {
-        Nilpotent {
-            scalar: -self.scalar,
-            ket: self.ket,
-        }
-    }
-}
-impl Neg for Rank1 {
-    type Output = Rank1;
-    fn neg(self) -> Self::Output {
-        let regularized = self.regularize();
-        Rank1 {
-            scalar: -regularized.scalar,
-            ket: regularized.ket,
-            bra: regularized.bra,
-        }
-    }
-}
-impl Neg for Pauli {
+
+impl<T: FloatExt + Hash> Add for RawMat<T> {
     type Output = Self;
-    fn neg(self) -> Self::Output {
-        Pauli {
-            idx: self.idx,
-            scalar: -self.scalar,
+
+    fn add(self, other: Self) -> Self {
+        let mut mat = self.mat;
+        for (i, row) in mat.iter_mut().enumerate() {
+            for (j, elem) in row.iter_mut().enumerate() {
+                *elem += other.mat[i][j];
+            }
         }
-    }
-}
-impl Neg for Rank2SVD {
-    type Output = Self;
-    fn neg(self) -> Self::Output {
-        let regularized = self.regularize();
-        Rank2SVD {
-            sigma1: -regularized.sigma1,
-            sigma2: -regularized.sigma2,
-            u1: regularized.u1,
-            u2: regularized.u2,
-            v1: regularized.v1,
-            v2: regularized.v2,
-        }
-    }
-}
-impl Neg for AltMat {
-    type Output = AltMat;
-    fn neg(self) -> Self::Output {
-        let regularized = self.regularize();
-        match regularized {
-            Self::Rank0 => Self::Rank0,
-            Self::Projector { projector } => Self::Projector {
-                projector: -projector,
-            },
-            Self::Nilpotent { nilpotent } => Self::Nilpotent {
-                nilpotent: -nilpotent,
-            },
-            Self::Rank1 { rank1 } => Self::Rank1 { rank1: -rank1 },
-            Self::Pauli { pauli } => Self::Pauli { pauli: -pauli },
-            Self::Rank2SVD { rank2 } => Self::Rank2SVD { rank2: -rank2 },
-        }
+        Self { mat }
     }
 }
 
-impl PartialEq for State {
-    fn eq(&self, other: &Self) -> bool {
-        let s = self.regularize();
-        let o = other.regularize();
-        match (s, o) {
-            (Self::Null, Self::Null) => true,
-            (
-                Self::Ket { c0, c1, phase },
-                Self::Ket {
-                    c0: d0,
-                    c1: d1,
-                    phase: p2,
-                },
-            ) => c0 == d0 && c1 == d1 && phase == p2,
-            (
-                Self::Bra { c0, c1, phase },
-                Self::Bra {
-                    c0: d0,
-                    c1: d1,
-                    phase: p2,
-                },
-            ) => c0 == d0 && c1 == d1 && phase == p2,
-            _ => false,
-        }
-    }
-}
-impl Eq for State {}
-impl PartialEq for Projector {
-    fn eq(&self, other: &Self) -> bool {
-        let s = self.regularize();
-        let o = other.regularize();
-        s.scalar == o.scalar && s.ket == o.ket
-    }
-}
-impl Eq for Projector {}
-impl PartialEq for Nilpotent {
-    fn eq(&self, other: &Self) -> bool {
-        let s = self.regularize();
-        let o = other.regularize();
-        s.scalar == o.scalar && s.ket == o.ket
-    }
-}
-impl Eq for Nilpotent {}
-impl PartialEq for Rank1 {
-    fn eq(&self, other: &Self) -> bool {
-        let s = self.regularize();
-        let o = other.regularize();
-        s.ket == o.ket && s.bra == o.bra && s.scalar == o.scalar
-    }
-}
-impl Eq for Rank1 {}
-impl PartialEq for Rank2SVD {
-    fn eq(&self, other: &Self) -> bool {
-        let s = self.regularize();
-        let o = other.regularize();
-        let c_same = s.sigma1 == o.sigma1
-            && s.u1 == o.u1
-            && s.v1 == o.v1
-            && s.sigma2 == o.sigma2
-            && s.u2 == o.u2
-            && s.v2 == o.v2;
-        let c_cross = s.sigma1 == o.sigma2
-            && s.u1 == o.u2
-            && s.v1 == o.v2
-            && s.sigma2 == o.sigma1
-            && s.u2 == o.u1
-            && s.v2 == o.v1;
-        c_same | c_cross
-    }
-}
-impl Eq for Rank2SVD {}
-impl PartialEq for Pauli {
-    fn eq(&self, other: &Self) -> bool {
-        self.idx == other.idx && self.scalar == other.scalar
-    }
-}
-impl Eq for Pauli {}
-impl PartialEq for AltMat {
-    fn eq(&self, other: &Self) -> bool {
-        let s = self.regularize();
-        let o = other.regularize();
-        match (s, o) {
-            (AltMat::Rank0, AltMat::Rank0) => true,
-            (AltMat::Rank1 { rank1 }, AltMat::Rank1 { rank1: rk2 }) => rank1 == rk2,
-            (AltMat::Rank2SVD { rank2 }, AltMat::Rank2SVD { rank2: rk2 }) => rank2 == rk2,
-            (AltMat::Pauli { pauli }, AltMat::Pauli { pauli: p2 }) => pauli.idx == p2.idx,
-            _ => false,
-        }
-    }
-}
-impl Eq for AltMat {}
-
-impl Mul<State> for Cpx {
-    type Output = State;
-    fn mul(self, state: State) -> State {
-        match state {
-            State::Null => State::Null,
-            State::Ket { c0, c1, phase } => {
-                let new_phase = self * phase;
-                if new_phase.is_zero() {
-                    State::Null
-                } else {
-                    State::Ket {
-                        c0,
-                        c1,
-                        phase: self * phase,
-                    }
-                }
-            }
-            State::Bra { c0, c1, phase } => {
-                let new_phase = self * phase;
-                if new_phase.is_zero() {
-                    State::Null
-                } else {
-                    State::Bra {
-                        c0,
-                        c1,
-                        phase: self * phase,
-                    }
-                }
-            }
-        }
-    }
-}
-impl Mul<Cpx> for State {
-    type Output = State;
-    fn mul(self, scalar: Cpx) -> State {
-        scalar * self
-    }
-}
-impl Mul<State> for f32 {
-    type Output = State;
-    fn mul(self, state: State) -> State {
-        match state {
-            State::Null => State::Null,
-            State::Ket { c0, c1, phase } => {
-                let new_phase = self * phase;
-                if new_phase.is_zero() {
-                    State::Null
-                } else {
-                    State::Ket {
-                        c0,
-                        c1,
-                        phase: self * phase,
-                    }
-                }
-            }
-            State::Bra { c0, c1, phase } => {
-                let new_phase = self * phase;
-                if new_phase.is_zero() {
-                    State::Null
-                } else {
-                    State::Bra {
-                        c0,
-                        c1,
-                        phase: self * phase,
-                    }
-                }
-            }
-        }
-    }
-}
-impl Mul<f32> for State {
-    type Output = State;
-    fn mul(self, scalar: f32) -> State {
-        scalar * self
-    }
-}
-impl Mul<Cpx> for Projector {
-    type Output = Projector;
-    fn mul(self, rhs: Cpx) -> Projector {
-        Projector {
-            scalar: self.scalar * rhs,
-            ket: self.ket,
-        }
-        .regularize()
-    }
-}
-impl Mul<Projector> for Cpx {
-    type Output = Projector;
-    fn mul(self, rhs: Projector) -> Projector {
-        (rhs * self).regularize()
-    }
-}
-impl Mul<f32> for Projector {
-    type Output = Projector;
-    fn mul(self, rhs: f32) -> Projector {
-        Projector {
-            scalar: self.scalar * rhs,
-            ket: self.ket,
-        }
-        .regularize()
-    }
-}
-impl Mul<Projector> for f32 {
-    type Output = Projector;
-    fn mul(self, rhs: Projector) -> Projector {
-        (rhs * self).regularize()
-    }
-}
-impl Mul<Cpx> for Nilpotent {
-    type Output = Nilpotent;
-    fn mul(self, rhs: Cpx) -> Nilpotent {
-        Nilpotent {
-            scalar: self.scalar * rhs,
-            ket: self.ket,
-        }
-        .regularize()
-    }
-}
-impl Mul<Nilpotent> for Cpx {
-    type Output = Nilpotent;
-    fn mul(self, rhs: Nilpotent) -> Nilpotent {
-        (rhs * self).regularize()
-    }
-}
-impl Mul<f32> for Nilpotent {
-    type Output = Nilpotent;
-    fn mul(self, rhs: f32) -> Nilpotent {
-        Nilpotent {
-            scalar: self.scalar * rhs,
-            ket: self.ket,
-        }
-        .regularize()
-    }
-}
-impl Mul<Nilpotent> for f32 {
-    type Output = Nilpotent;
-    fn mul(self, rhs: Nilpotent) -> Nilpotent {
-        (rhs * self).regularize()
-    }
-}
-impl Mul<Cpx> for Rank1 {
-    type Output = Rank1;
-    fn mul(self, rhs: Cpx) -> Self::Output {
-        Rank1 {
-            scalar: self.scalar * rhs,
-            ket: self.ket,
-            bra: self.bra,
-        }
-        .regularize()
-    }
-}
-impl Mul<Rank1> for Cpx {
-    type Output = Rank1;
-    fn mul(self, rhs: Rank1) -> Self::Output {
-        Rank1 {
-            scalar: rhs.scalar * self,
-            ket: rhs.ket,
-            bra: rhs.bra,
-        }
-        .regularize()
-    }
-}
-impl Mul<f32> for Rank1 {
-    type Output = Rank1;
-    fn mul(self, rhs: f32) -> Self::Output {
-        Rank1 {
-            scalar: self.scalar * rhs,
-            ket: self.ket,
-            bra: self.bra,
-        }
-        .regularize()
-    }
-}
-impl Mul<Rank1> for f32 {
-    type Output = Rank1;
-    fn mul(self, rhs: Rank1) -> Self::Output {
-        Rank1 {
-            scalar: rhs.scalar * self,
-            ket: rhs.ket,
-            bra: rhs.bra,
-        }
-        .regularize()
-    }
-}
-impl Mul<Cpx> for Rank2SVD {
-    type Output = Rank2SVD;
-    fn mul(self, rhs: Cpx) -> Self::Output {
-        let s = self.regularize();
-        Rank2SVD {
-            sigma1: s.sigma1 * rhs,
-            sigma2: s.sigma2 * rhs,
-            u1: s.u1,
-            u2: s.u2,
-            v1: s.v1,
-            v2: s.v2,
-        }
-    }
-}
-impl Mul<Rank2SVD> for Cpx {
-    type Output = Rank2SVD;
-    fn mul(self, rhs: Rank2SVD) -> Self::Output {
-        rhs * self
-    }
-}
-impl Mul<f32> for Rank2SVD {
-    type Output = Rank2SVD;
-    fn mul(self, rhs: f32) -> Self::Output {
-        let s = self.regularize();
-        Rank2SVD {
-            sigma1: s.sigma1 * rhs,
-            sigma2: s.sigma2 * rhs,
-            u1: s.u1,
-            u2: s.u2,
-            v1: s.v1,
-            v2: s.v2,
-        }
-    }
-}
-impl Mul<Rank2SVD> for f32 {
-    type Output = Rank2SVD;
-    fn mul(self, rhs: Rank2SVD) -> Self::Output {
-        rhs * self
-    }
-}
-impl Mul<Cpx> for Pauli {
-    type Output = Pauli;
-    fn mul(self, rhs: Cpx) -> Self::Output {
-        Pauli {
-            idx: self.idx,
-            scalar: self.scalar * rhs,
-        }
-    }
-}
-impl Mul<Pauli> for Cpx {
-    type Output = Pauli;
-    fn mul(self, rhs: Pauli) -> Self::Output {
-        Pauli {
-            idx: rhs.idx,
-            scalar: rhs.scalar * self,
-        }
-    }
-}
-impl Mul<f32> for Pauli {
-    type Output = Pauli;
-    fn mul(self, rhs: f32) -> Self::Output {
-        Pauli {
-            idx: self.idx,
-            scalar: self.scalar * rhs,
-        }
-    }
-}
-impl Mul<Pauli> for f32 {
-    type Output = Pauli;
-    fn mul(self, rhs: Pauli) -> Self::Output {
-        Pauli {
-            idx: rhs.idx,
-            scalar: rhs.scalar * self,
-        }
-    }
-}
-impl Mul<Cpx> for AltMat {
-    type Output = AltMat;
-    fn mul(self, rhs: Cpx) -> Self::Output {
-        match self {
-            Self::Rank0 => Self::Rank0,
-            Self::Projector { projector } => Self::Projector {
-                projector: projector * rhs,
-            },
-            Self::Nilpotent { nilpotent } => Self::Nilpotent {
-                nilpotent: nilpotent * rhs,
-            },
-            Self::Rank1 { rank1 } => Self::Rank1 { rank1: rank1 * rhs },
-            Self::Pauli { pauli } => Self::Pauli { pauli: pauli * rhs },
-            Self::Rank2SVD { rank2 } => Self::Rank2SVD { rank2: rank2 * rhs },
-        }
-    }
-}
-impl Mul<AltMat> for Cpx {
-    type Output = AltMat;
-    fn mul(self, rhs: AltMat) -> Self::Output {
-        rhs * self
-    }
-}
-impl Mul<f32> for AltMat {
-    type Output = AltMat;
-    fn mul(self, rhs: f32) -> Self::Output {
-        match self {
-            Self::Rank0 => Self::Rank0,
-            Self::Projector { projector } => Self::Projector {
-                projector: projector * rhs,
-            },
-            Self::Nilpotent { nilpotent } => Self::Nilpotent {
-                nilpotent: nilpotent * rhs,
-            },
-            Self::Rank1 { rank1 } => Self::Rank1 { rank1: rank1 * rhs },
-            Self::Pauli { pauli } => Self::Pauli { pauli: pauli * rhs },
-            Self::Rank2SVD { rank2 } => Self::Rank2SVD { rank2: rank2 * rhs },
-        }
-    }
-}
-impl Mul<AltMat> for f32 {
-    type Output = AltMat;
-    fn mul(self, rhs: AltMat) -> Self::Output {
-        rhs * self
-    }
-}
-
-impl Add for State {
-    type Output = State;
-    fn add(self, other: State) -> State {
-        match (self, other) {
-            (Self::Null, _) => other,
-            (_, Self::Null) => self,
-            (
-                Self::Ket { c0, c1, phase },
-                Self::Ket {
-                    c0: d0,
-                    c1: d1,
-                    phase: p2,
-                },
-            ) => {
-                let new_c0 = phase * c0 + p2 * d0;
-                let new_c1 = phase * c1 + p2 * d1;
-                Self::Ket {
-                    c0: new_c0,
-                    c1: new_c1,
-                    phase: ONE,
-                }
-                .regularize()
-            }
-            (
-                Self::Bra { c0, c1, phase },
-                Self::Bra {
-                    c0: d0,
-                    c1: d1,
-                    phase: p2,
-                },
-            ) => {
-                let new_c0 = phase * c0 + p2 * d0;
-                let new_c1 = phase * c1 + p2 * d1;
-                Self::Bra {
-                    c0: new_c0,
-                    c1: new_c1,
-                    phase: ONE,
-                }
-                .regularize()
-            }
-            _ => panic!("Cannot add/sub State::Bra with State::Ket."),
-        }
-    }
-}
-impl AddAssign for State {
+impl<T: FloatExt + Hash> AddAssign for RawMat<T> {
     fn add_assign(&mut self, other: Self) {
-        *self = *self + other;
+        for (i, row) in self.mat.iter_mut().enumerate() {
+            for (j, elem) in row.iter_mut().enumerate() {
+                *elem += other.mat[i][j];
+            }
+        }
     }
 }
-impl Sub for State {
-    type Output = State;
-    fn sub(self, other: State) -> State {
+
+impl<T: FloatExt + Hash> Neg for RawMat<T> {
+    type Output = Self;
+    fn neg(self) -> Self {
+        let mut mat = self.mat;
+        for row in mat.iter_mut() {
+            for elem in row.iter_mut() {
+                *elem = -*elem;
+            }
+        }
+        Self { mat }
+    }
+}
+
+impl<T: FloatExt + Hash> Sub for RawMat<T> {
+    type Output = Self;
+    fn sub(self, other: Self) -> Self {
         self + (-other)
     }
 }
-impl SubAssign for State {
+
+impl<T: FloatExt + Hash> SubAssign for RawMat<T> {
     fn sub_assign(&mut self, other: Self) {
-        *self = *self - other;
-    }
-}
-impl Add for AltMat {
-    type Output = AltMat;
-
-    fn add(self, rhs: Self) -> Self::Output {
-        let s = self.regularize();
-        let r = rhs.regularize();
-
-        match (s, r) {
-            (Self::Rank0, x) | (x, Self::Rank0) => x, // Return the non-zero rank matrix
-            (x, y) => {
-                // Extract matrices from each of the operands
-                let m1 = match x {
-                    AltMat::Rank1 { rank1 } => rank1.to_mat(),
-                    AltMat::Rank2SVD { rank2 } => rank2.to_mat(),
-                    AltMat::Pauli { pauli } => pauli.to_mat(),
-                    _ => panic!("Invalid input."),
-                };
-
-                let m2 = match y {
-                    AltMat::Rank1 { rank1 } => rank1.to_mat(),
-                    AltMat::Rank2SVD { rank2 } => rank2.to_mat(),
-                    AltMat::Pauli { pauli } => pauli.to_mat(),
-                    _ => panic!("Invalid input."),
-                };
-
-                // Sum the two matrices element-wise
-                let m3 = [
-                    [m1[0][0] + m2[0][0], m1[0][1] + m2[0][1]],
-                    [m1[1][0] + m2[1][0], m1[1][1] + m2[1][1]],
-                ];
-
-                // Return a Rank2SVD matrix with the summed result
-                Self::Rank2SVD {
-                    rank2: Rank2SVD {
-                        sigma1: ONE,
-                        sigma2: ONE,
-                        u1: State::Ket {
-                            c0: ONE,
-                            c1: ZERO,
-                            phase: ONE,
-                        },
-                        u2: State::Ket {
-                            c0: ZERO,
-                            c1: ONE,
-                            phase: ONE,
-                        },
-                        v1: State::Bra {
-                            c0: m3[0][0],
-                            c1: m3[0][1],
-                            phase: ONE,
-                        },
-                        v2: State::Bra {
-                            c0: m3[1][0],
-                            c1: m3[1][1],
-                            phase: ONE,
-                        },
-                    }
-                    .regularize(),
-                }
-                .regularize()
-            }
-        }
-    }
-}
-impl AddAssign for AltMat {
-    fn add_assign(&mut self, other: Self) {
-        *self = *self + other;
-    }
-}
-impl Sub for AltMat {
-    type Output = AltMat;
-    fn sub(self, rhs: Self) -> Self::Output {
-        self + (-rhs)
-    }
-}
-impl SubAssign for AltMat {
-    fn sub_assign(&mut self, other: Self) {
-        *self = *self - other;
+        *self += -other;
     }
 }
 
-impl Mul<State> for Projector {
-    type Output = State;
-    fn mul(self, rhs: State) -> Self::Output {
-        match rhs {
-            State::Null => State::Null,
-            State::Ket { .. } => self.scalar * self.ket.dag().inner(&rhs) * self.ket,
-            _ => panic!("Invalid input."),
-        }
-    }
-}
-impl Mul<Projector> for State {
-    type Output = State;
-    fn mul(self, rhs: Projector) -> Self::Output {
-        match self {
-            State::Null => State::Null,
-            State::Bra { .. } => rhs.scalar * self.inner(&rhs.ket) * rhs.ket.dag(),
-            _ => panic!("Invalid input."),
-        }
-    }
-}
-impl Mul<State> for Nilpotent {
-    type Output = State;
-    fn mul(self, rhs: State) -> Self::Output {
-        match rhs {
-            State::Null => State::Null,
-            State::Ket { .. } => {
-                let regularized = self.regularize();
-                regularized.scalar
-                    * regularized.ket.orthogonal().dag().inner(&rhs)
-                    * regularized.ket
-            }
-            _ => panic!("Invalid input."),
-        }
-    }
-}
-impl Mul<Nilpotent> for State {
-    type Output = State;
-    fn mul(self, rhs: Nilpotent) -> Self::Output {
-        match self {
-            State::Null => State::Null,
-            State::Bra { .. } => {
-                let regularized = rhs.regularize();
-                regularized.scalar
-                    * self.inner(&regularized.ket)
-                    * regularized.ket.orthogonal().dag()
-            }
-            _ => panic!("Invalid input."),
-        }
-    }
-}
-impl Mul<State> for Rank1 {
-    type Output = State;
-    fn mul(self, rhs: State) -> Self::Output {
-        match rhs {
-            State::Null => State::Null,
-            State::Ket { .. } => {
-                let new_rank1 = self.regularize();
-                let new_rhs = rhs.regularize();
-                let new_phase =
-                    new_rank1.scalar * new_rhs.phase() * new_rank1.bra.inner(&new_rhs.normalize());
-                let new_ket = new_rank1.ket;
-                State::Ket {
-                    c0: new_ket.c0(),
-                    c1: new_ket.c1(),
-                    phase: new_phase,
-                }
-                .regularize()
-            }
-            _ => panic!("Should have Rank1 * State::Ket instead of Rank1 * State::Bra."),
-        }
-    }
-}
-impl Mul<Rank1> for State {
-    type Output = State;
-    fn mul(self, rhs: Rank1) -> Self::Output {
-        match self {
-            State::Null => State::Null,
-            State::Bra { .. } => {
-                let new_rank1 = rhs.regularize();
-                let new_self = self.regularize();
-                let new_phase = new_rank1.scalar
-                    * new_self.phase()
-                    * new_self.inner(&new_rank1.ket.normalize());
-                let new_bra = new_rank1.bra;
-                State::Bra {
-                    c0: new_bra.c0(),
-                    c1: new_bra.c1(),
-                    phase: new_phase,
-                }
-                .regularize()
-            }
-            _ => panic!("Should have State::Bra * Rank1 instead of State::Ket * Rank1."),
-        }
-    }
-}
-impl Mul<State> for Rank2SVD {
-    type Output = State;
-    fn mul(self, rhs: State) -> Self::Output {
-        let s = rhs.regularize();
-        match s {
-            State::Null => State::Null,
-            State::Ket { .. } => {
-                let new_rank2svd = self.regularize();
-                let rank1_1st = Rank1 {
-                    scalar: new_rank2svd.sigma1,
-                    ket: new_rank2svd.u1,
-                    bra: new_rank2svd.v1,
-                };
-                let rank1_2nd = Rank1 {
-                    scalar: new_rank2svd.sigma2,
-                    ket: new_rank2svd.u2,
-                    bra: new_rank2svd.v2,
-                };
-                (rank1_1st * s + rank1_2nd * s).regularize()
-            }
-            _ => panic!("Invalid input."),
-        }
-    }
-}
-impl Mul<Rank2SVD> for State {
-    type Output = State;
-    fn mul(self, rhs: Rank2SVD) -> Self::Output {
-        let s = self.regularize();
-        match s {
-            State::Null => State::Null,
-            State::Bra { .. } => {
-                let new_rank2svd = rhs.regularize();
-                let rank1_1st = Rank1 {
-                    scalar: new_rank2svd.sigma1,
-                    ket: new_rank2svd.u1,
-                    bra: new_rank2svd.v1,
-                };
-                let rank1_2nd = Rank1 {
-                    scalar: new_rank2svd.sigma2,
-                    ket: new_rank2svd.u2,
-                    bra: new_rank2svd.v2,
-                };
-                (s * rank1_1st + s * rank1_2nd).regularize()
-            }
-            _ => panic!("Invalid input."),
-        }
-    }
-}
-impl Mul<State> for Pauli {
-    type Output = State;
-    fn mul(self, rhs: State) -> Self::Output {
-        match rhs {
-            State::Null => State::Null,
-            State::Ket { c0, c1, phase } => match self.idx {
-                0 => self.scalar * rhs,
-                1 => State::Ket {
-                    c0: c1,
-                    c1: c0,
-                    phase: phase * self.scalar,
-                }
-                .regularize(),
-                2 => State::Ket {
-                    c0: -J * c1,
-                    c1: J * c0,
-                    phase: phase * self.scalar,
-                }
-                .regularize(),
-                3 => State::Ket {
-                    c0,
-                    c1: -c1,
-                    phase: phase * self.scalar,
-                }
-                .regularize(),
-                _ => panic!("Invalid index for Pauli matrix."),
-            },
-            _ => panic!("Invalid input state. Please check when to use Ket or Bra."),
-        }
-    }
-}
-
-impl Mul<Pauli> for State {
-    type Output = State;
-    fn mul(self, rhs: Pauli) -> Self::Output {
-        match self {
-            State::Null => State::Null,
-            State::Bra { c0, c1, phase } => match rhs.idx {
-                0 => self * rhs.scalar,
-                1 => State::Bra {
-                    c0: c1,
-                    c1: c0,
-                    phase: phase * rhs.scalar,
-                }
-                .regularize(),
-                2 => State::Bra {
-                    c0: J * c1,
-                    c1: -J * c0,
-                    phase: phase * rhs.scalar,
-                }
-                .regularize(),
-                3 => State::Bra {
-                    c0,
-                    c1: -c1,
-                    phase: phase * rhs.scalar,
-                }
-                .regularize(),
-                _ => panic!("Invalid index for Pauli matrix."),
-            },
-            _ => panic!("Invalid input state. Please check when to use Ket or Bra."),
-        }
-    }
-}
-
-impl Mul<State> for AltMat {
-    type Output = State;
-    fn mul(self, rhs: State) -> Self::Output {
-        match rhs {
-            State::Null => State::Null,
-            State::Ket { .. } => match self {
-                AltMat::Rank0 => State::Null,
-                AltMat::Projector { projector } => projector * rhs,
-                AltMat::Nilpotent { nilpotent } => nilpotent * rhs,
-                AltMat::Rank1 { rank1 } => rank1 * rhs,
-                AltMat::Rank2SVD { rank2 } => rank2 * rhs,
-                AltMat::Pauli {
-                    pauli: Pauli { idx, scalar },
-                } => match idx {
-                    0 => scalar * rhs,
-                    1 => State::Ket {
-                        c0: rhs.c1(),
-                        c1: rhs.c0(),
-                        phase: rhs.phase() * scalar,
-                    }
-                    .regularize(),
-                    2 => State::Ket {
-                        c0: -J * rhs.c1(),
-                        c1: J * rhs.c0(),
-                        phase: rhs.phase() * scalar,
-                    }
-                    .regularize(),
-                    3 => State::Ket {
-                        c0: rhs.c0(),
-                        c1: -rhs.c1(),
-                        phase: rhs.phase() * scalar,
-                    },
-                    _ => panic!("Invalid index for Pauli matrix."),
-                },
-            },
-            State::Bra { .. } => {
-                panic!("Should have AltMat * State::Ket instead of AltMat * State::Bra.")
-            }
-        }
-    }
-}
-
-impl Mul<AltMat> for State {
-    type Output = State;
-    fn mul(self, rhs: AltMat) -> Self::Output {
-        match self {
-            State::Null => State::Null,
-            State::Bra { .. } => match rhs {
-                AltMat::Rank0 => State::Null,
-                AltMat::Projector { projector } => self * projector,
-                AltMat::Nilpotent { nilpotent } => self * nilpotent,
-                AltMat::Rank1 { rank1 } => self * rank1,
-                AltMat::Rank2SVD { rank2 } => self * rank2,
-                AltMat::Pauli {
-                    pauli: Pauli { idx, scalar },
-                } => match idx {
-                    0 => self * scalar,
-                    1 => State::Ket {
-                        c0: self.c1(),
-                        c1: self.c0(),
-                        phase: self.phase() * scalar,
-                    },
-                    2 => State::Ket {
-                        c0: -J * self.c1(),
-                        c1: J * self.c0(),
-                        phase: self.phase() * scalar,
-                    },
-                    3 => State::Ket {
-                        c0: self.c0(),
-                        c1: -self.c1(),
-                        phase: self.phase() * scalar,
-                    },
-                    _ => panic!("Invalid index for Pauli matrix."),
-                },
-            },
-            State::Ket { .. } => {
-                panic!("Should have State::Bra * AltMat instead of State::Ket * AltMat.")
-            }
-        }
-    }
-}
-impl Mul for Rank1 {
-    type Output = Rank1;
-    fn mul(self, other: Self) -> Self::Output {
-        let s = self.regularize();
-        let o = other.regularize();
-        let new_scalar = (s.scalar * o.scalar * s.bra.inner(&o.ket)).regularize();
-        Rank1 {
-            scalar: new_scalar,
-            ket: s.ket,
-            bra: o.bra,
-        }
-        .regularize()
-    }
-}
-impl Mul for Rank2SVD {
+impl<T: FloatExt + Hash> Mul for RawMat<T> {
     type Output = Self;
+
     fn mul(self, rhs: Self) -> Self::Output {
-        let s = self.regularize();
-        let r = rhs.regularize();
-        Rank2SVD {
-            sigma1: ONE,
-            sigma2: ONE,
-            u1: s.u1,
-            u2: s.u2,
-            v1: s.sigma1
-                * (s.v1.inner(&r.u1) * r.v1 * r.sigma1 + s.v1.inner(&r.u2) * r.v2 * r.sigma2),
-            v2: s.sigma2
-                * (s.v2.inner(&r.u1) * r.v1 * r.sigma1 + s.v2.inner(&r.u2) * r.v2 * r.sigma2),
-        }
-        .regularize()
-    }
-}
-impl Mul for Pauli {
-    type Output = Pauli;
-    fn mul(self, rhs: Self) -> Self::Output {
-        let pauli_lookup = [
-            [0, 1, 2, 3], // I * {I, X, Y, Z}
-            [1, 0, 3, 2], // X * {I, X, Y, Z}
-            [2, 3, 0, 1], // Y * {I, X, Y, Z}
-            [3, 2, 1, 0], // Z * {I, X, Y, Z}
-        ];
-        let sign_lookup = [
-            [ONE; 4],          // I * {I, X, Y, Z}
-            [ONE, ONE, J, -J], // X * {I, X, Y, Z}
-            [ONE, -J, ONE, J], // Y * {I, X, Y, Z}
-            [ONE, J, -J, ONE], // Z * {I, X, Y, Z}
-        ];
-        let new_idx = pauli_lookup[self.idx as usize][rhs.idx as usize];
-        let new_scalar =
-            self.scalar * rhs.scalar * sign_lookup[self.idx as usize][rhs.idx as usize];
-        Pauli {
-            idx: new_idx,
-            scalar: new_scalar,
-        }
-    }
-}
-impl Mul for AltMat {
-    type Output = AltMat;
-    fn mul(self, rhs: Self) -> Self::Output {
-        match (self.regularize(), rhs.regularize()) {
-            (Self::Rank0, _) | (_, Self::Rank0) => Self::Rank0,
-            (
-                Self::Projector { projector },
-                Self::Projector {
-                    projector: projector2,
-                },
-            ) => {
-                if projector.ket == projector2.ket {
-                    Self::Projector { projector }
-                } else if projector.ket.dag().inner(&projector2.ket).is_zero() {
-                    Self::Rank0
-                } else {
-                    Self::Rank1 {
-                        rank1: Rank1 {
-                            scalar: projector.scalar
-                                * projector2.scalar
-                                * projector.ket.dag().inner(&projector2.ket),
-                            ket: projector.ket,
-                            bra: projector2.ket.dag(),
-                        },
-                    }
-                }
-            }
-            (Self::Projector { projector }, Self::Nilpotent { nilpotent }) => {
-                if projector.ket == nilpotent.ket {
-                    Self::Rank0
-                } else if projector.ket.dag().inner(&nilpotent.ket).is_zero() {
-                    Self::Nilpotent {
-                        nilpotent: Nilpotent {
-                            scalar: projector.scalar * nilpotent.scalar,
-                            ket: nilpotent.ket,
-                        },
-                    }
-                } else {
-                    Self::Rank1 {
-                        rank1: Rank1 {
-                            scalar: projector.scalar
-                                * nilpotent.scalar
-                                * projector.ket.dag().inner(&nilpotent.ket),
-                            ket: projector.ket,
-                            bra: nilpotent.ket.dag(),
-                        },
-                    }
-                }
-            }
-            (Self::Projector { projector }, Self::Rank1 { rank1 }) => Self::Rank1 {
-                rank1: Rank1 {
-                    scalar: projector.scalar * rank1.scalar * projector.ket.dag().inner(&rank1.ket),
-                    ket: projector.ket,
-                    bra: rank1.bra,
-                },
-            },
-            (Self::Projector { projector }, Self::Rank2SVD { rank2 }) => {
-                let mut new_bra = projector.scalar
-                    * (rank2.sigma1 * rank2.v1 * projector.ket.dag().inner(&rank2.u1)
-                        + rank2.sigma2 * rank2.v2 * projector.ket.dag().inner(&rank2.u2))
-                    .regularize();
-                let new_scalar = new_bra.phase();
-                new_bra = new_bra.normalize();
-                if projector.ket == new_bra.dag() {
-                    Self::Projector {
-                        projector: Projector {
-                            scalar: new_scalar,
-                            ket: projector.ket,
-                        },
-                    }
-                } else if new_bra.inner(&projector.ket).is_zero() {
-                    Self::Nilpotent {
-                        nilpotent: Nilpotent {
-                            scalar: new_scalar,
-                            ket: projector.ket,
-                        },
-                    }
-                } else {
-                    Self::Rank1 {
-                        rank1: Rank1 {
-                            scalar: new_scalar,
-                            ket: projector.ket,
-                            bra: new_bra,
-                        },
-                    }
-                }
-            }
-            (Self::Projector { projector }, Self::Pauli { pauli }) => match pauli.idx {
-                0 => Self::Projector {
-                    projector: projector * pauli.scalar,
-                },
-                1 => Self::Rank1 {
-                    rank1: Rank1 {
-                        scalar: projector.scalar * pauli.scalar,
-                        ket: projector.ket,
-                        bra: projector.ket.dag().inner(&KET_X0) * KET_X0.dag()
-                            - projector.ket.dag().inner(&KET_X1) * KET_X1.dag(),
-                    },
-                }
-                .regularize(),
-                2 => Self::Rank1 {
-                    rank1: Rank1 {
-                        scalar: projector.scalar * pauli.scalar,
-                        ket: projector.ket,
-                        bra: projector.ket.dag().inner(&KET_Y0) * KET_Y0.dag()
-                            - projector.ket.dag().inner(&KET_Y1) * KET_Y1.dag(),
-                    },
-                }
-                .regularize(),
-                3 => Self::Rank1 {
-                    rank1: Rank1 {
-                        scalar: projector.scalar * pauli.scalar,
-                        ket: projector.ket,
-                        bra: projector.ket.dag().inner(&KET_Z0) * KET_Z0.dag()
-                            - projector.ket.dag().inner(&KET_Z1) * KET_Z1.dag(),
-                    },
-                }
-                .regularize(),
-                _ => unreachable!(),
-            },
-            (Self::Nilpotent { nilpotent }, Self::Projector { projector }) => {
-                if projector.ket == nilpotent.ket {
-                    Self::Rank0
-                } else if nilpotent.ket.dag().inner(&projector.ket).is_zero() {
-                    Self::Nilpotent {
-                        nilpotent: Nilpotent {
-                            scalar: projector.scalar * nilpotent.scalar,
-                            ket: nilpotent.ket,
-                        },
-                    }
-                } else {
-                    Self::Rank1 {
-                        rank1: Rank1 {
-                            scalar: nilpotent.scalar
-                                * projector.scalar
-                                * nilpotent.ket.dag().orthogonal().inner(&projector.ket),
-                            ket: nilpotent.ket,
-                            bra: projector.ket.dag(),
-                        },
-                    }
-                }
-            }
-            (Self::Rank1 { rank1 }, Self::Projector { projector }) => Self::Rank1 {
-                rank1: Rank1 {
-                    scalar: projector.scalar * rank1.scalar * rank1.bra.inner(&projector.ket),
-                    ket: rank1.ket,
-                    bra: projector.ket.dag(),
-                },
-            },
-            (Self::Rank2SVD { rank2 }, Self::Projector { projector }) => {
-                let mut new_ket = projector.scalar
-                    * (rank2.sigma1 * rank2.u1 * rank2.v1.inner(&projector.ket)
-                        + rank2.sigma2 * rank2.v2 * rank2.u2.inner(&projector.ket))
-                    .regularize();
-                let new_scalar = new_ket.phase();
-                new_ket = new_ket.normalize();
-                if projector.ket == new_ket {
-                    Self::Projector {
-                        projector: Projector {
-                            scalar: new_scalar,
-                            ket: projector.ket,
-                        },
-                    }
-                } else if projector.ket.dag().inner(&new_ket).is_zero() {
-                    Self::Nilpotent {
-                        nilpotent: Nilpotent {
-                            scalar: new_scalar,
-                            ket: new_ket,
-                        },
-                    }
-                } else {
-                    Self::Rank1 {
-                        rank1: Rank1 {
-                            scalar: new_scalar,
-                            ket: new_ket,
-                            bra: projector.ket.dag(),
-                        },
-                    }
-                }
-            }
-            (Self::Pauli { pauli }, Self::Projector { projector }) => match pauli.idx {
-                0 => Self::Projector {
-                    projector: projector * pauli.scalar,
-                },
-                1 => Self::Rank1 {
-                    rank1: Rank1 {
-                        scalar: projector.scalar * pauli.scalar,
-                        ket: KET_X0.dag().inner(&projector.ket) * KET_X0
-                            - KET_X1.dag().inner(&projector.ket) * KET_X1,
-                        bra: projector.ket.dag(),
-                    },
-                }
-                .regularize(),
-                2 => Self::Rank1 {
-                    rank1: Rank1 {
-                        scalar: projector.scalar * pauli.scalar,
-                        ket: KET_Y0.dag().inner(&projector.ket) * KET_Y0
-                            - KET_Y1.dag().inner(&projector.ket) * KET_Y1,
-                        bra: projector.ket.dag(),
-                    },
-                }
-                .regularize(),
-                3 => Self::Rank1 {
-                    rank1: Rank1 {
-                        scalar: projector.scalar * pauli.scalar,
-                        ket: KET_Z0.dag().inner(&projector.ket) * KET_Z0
-                            - KET_Z1.dag().inner(&projector.ket) * KET_Z1,
-                        bra: projector.ket.dag(),
-                    },
-                }
-                .regularize(),
-                _ => unreachable!(),
-            },
-            (
-                Self::Nilpotent { nilpotent },
-                Self::Nilpotent {
-                    nilpotent: nilpotent2,
-                },
-            ) => {
-                if nilpotent.ket == nilpotent2.ket {
-                    Self::Rank0
-                } else if nilpotent.ket.dag().inner(&nilpotent2.ket).is_zero() {
-                    Self::Projector {
-                        projector: Projector {
-                            scalar: nilpotent.scalar * nilpotent2.scalar,
-                            ket: nilpotent.ket,
-                        },
-                    }
-                } else {
-                    Self::Rank1 {
-                        rank1: Rank1 {
-                            scalar: nilpotent.scalar
-                                * nilpotent2.scalar
-                                * nilpotent.ket.dag().inner(&nilpotent2.ket),
-                            ket: nilpotent.ket,
-                            bra: nilpotent2.ket.dag(),
-                        },
-                    }
-                }
-            }
-            (Self::Nilpotent { nilpotent }, Self::Rank1 { rank1 }) => Self::Rank1 {
-                rank1: Rank1 {
-                    scalar: nilpotent.scalar
-                        * rank1.scalar
-                        * nilpotent.ket.dag().orthogonal().inner(&rank1.ket),
-                    ket: nilpotent.ket,
-                    bra: rank1.bra,
-                },
-            }
-            .regularize(),
-            (Self::Rank1 { rank1 }, Self::Nilpotent { nilpotent }) => Self::Rank1 {
-                rank1: Rank1 {
-                    scalar: nilpotent.scalar * rank1.scalar * rank1.bra.inner(&nilpotent.ket),
-                    ket: rank1.ket,
-                    bra: nilpotent.ket.dag().orthogonal(),
-                },
-            }
-            .regularize(),
-            (Self::Nilpotent { nilpotent }, Self::Rank2SVD { rank2 }) => {
-                let mut new_bra = nilpotent.scalar
-                    * (rank2.sigma1 * rank2.v1 * nilpotent.ket.dag().orthogonal().inner(&rank2.u1)
-                        + rank2.sigma2
-                            * rank2.v2
-                            * nilpotent.ket.dag().orthogonal().inner(&rank2.u2))
-                    .regularize();
-                let new_scalar = new_bra.phase();
-                new_bra = new_bra.normalize();
-                if nilpotent.ket == new_bra.dag() {
-                    Self::Projector {
-                        projector: Projector {
-                            scalar: new_scalar,
-                            ket: nilpotent.ket,
-                        },
-                    }
-                } else if new_bra.inner(&nilpotent.ket).is_zero() {
-                    Self::Nilpotent {
-                        nilpotent: Nilpotent {
-                            scalar: new_scalar,
-                            ket: nilpotent.ket,
-                        },
-                    }
-                } else {
-                    Self::Rank1 {
-                        rank1: Rank1 {
-                            scalar: new_scalar,
-                            ket: nilpotent.ket,
-                            bra: new_bra,
-                        },
-                    }
-                }
-            }
-            (Self::Rank2SVD { rank2 }, Self::Nilpotent { nilpotent }) => {
-                let mut new_ket = nilpotent.scalar
-                    * (rank2.sigma1 * rank2.u1 * rank2.v1.inner(&nilpotent.ket)
-                        + rank2.sigma2 * rank2.v2 * rank2.u2.inner(&nilpotent.ket))
-                    .regularize();
-                let new_scalar = new_ket.phase();
-                new_ket = new_ket.normalize();
-                if nilpotent.ket.orthogonal() == new_ket {
-                    Self::Projector {
-                        projector: Projector {
-                            scalar: new_scalar,
-                            ket: new_ket,
-                        },
-                    }
-                } else if nilpotent.ket.dag().orthogonal().inner(&new_ket).is_zero() {
-                    Self::Nilpotent {
-                        nilpotent: Nilpotent {
-                            scalar: new_scalar,
-                            ket: new_ket,
-                        },
-                    }
-                } else {
-                    Self::Rank1 {
-                        rank1: Rank1 {
-                            scalar: new_scalar,
-                            ket: new_ket,
-                            bra: nilpotent.ket.dag().orthogonal(),
-                        },
-                    }
-                }
-            }
-            (Self::Nilpotent { nilpotent }, Self::Pauli { pauli }) => match pauli.idx {
-                0 => Self::Nilpotent {
-                    nilpotent: nilpotent * pauli.scalar,
-                },
-                1 => Self::Rank1 {
-                    rank1: Rank1 {
-                        scalar: nilpotent.scalar * pauli.scalar,
-                        ket: nilpotent.ket,
-                        bra: nilpotent.ket.dag().orthogonal().inner(&KET_X0) * KET_X0.dag()
-                            - nilpotent.ket.dag().orthogonal().inner(&KET_X1) * KET_X1.dag(),
-                    },
-                }
-                .regularize(),
-                2 => Self::Rank1 {
-                    rank1: Rank1 {
-                        scalar: nilpotent.scalar * pauli.scalar,
-                        ket: nilpotent.ket,
-                        bra: nilpotent.ket.dag().orthogonal().inner(&KET_Y0) * KET_Y0.dag()
-                            - nilpotent.ket.dag().orthogonal().inner(&KET_Y1) * KET_Y1.dag(),
-                    },
-                }
-                .regularize(),
-                3 => Self::Rank1 {
-                    rank1: Rank1 {
-                        scalar: nilpotent.scalar * pauli.scalar,
-                        ket: nilpotent.ket,
-                        bra: nilpotent.ket.dag().orthogonal().inner(&KET_Z0) * KET_Z0.dag()
-                            - nilpotent.ket.dag().orthogonal().inner(&KET_Z1) * KET_Z1.dag(),
-                    },
-                }
-                .regularize(),
-                _ => unreachable!(),
-            },
-            (Self::Pauli { pauli }, Self::Nilpotent { nilpotent }) => match pauli.idx {
-                0 => Self::Nilpotent {
-                    nilpotent: nilpotent * pauli.scalar,
-                },
-                1 => Self::Rank1 {
-                    rank1: Rank1 {
-                        scalar: nilpotent.scalar * pauli.scalar,
-                        ket: KET_X0.dag().inner(&nilpotent.ket) * KET_X0
-                            - KET_X1.dag().inner(&nilpotent.ket) * KET_X1,
-                        bra: nilpotent.ket.dag().orthogonal(),
-                    },
-                }
-                .regularize(),
-                2 => Self::Rank1 {
-                    rank1: Rank1 {
-                        scalar: nilpotent.scalar * pauli.scalar,
-                        ket: KET_Y0.dag().inner(&nilpotent.ket) * KET_Y0
-                            - KET_Y1.dag().inner(&nilpotent.ket) * KET_Y1,
-                        bra: nilpotent.ket.dag().orthogonal(),
-                    },
-                }
-                .regularize(),
-                3 => Self::Rank1 {
-                    rank1: Rank1 {
-                        scalar: nilpotent.scalar * pauli.scalar,
-                        ket: KET_Z0.dag().inner(&nilpotent.ket) * KET_Z0
-                            - KET_Z1.dag().inner(&nilpotent.ket) * KET_Z1,
-                        bra: nilpotent.ket.dag().orthogonal(),
-                    },
-                }
-                .regularize(),
-                _ => unreachable!(),
-            },
-            (Self::Rank1 { rank1 }, Self::Rank1 { rank1: rk1 }) => {
-                Self::Rank1 { rank1: rank1 * rk1 }
-            }
-            (Self::Rank1 { rank1 }, Self::Rank2SVD { rank2 }) => Self::Rank1 {
-                rank1: rank1 * rank2,
-            },
-            (Self::Rank1 { rank1 }, Self::Pauli { pauli }) => Self::Rank1 {
-                rank1: rank1 * pauli,
-            },
-            (Self::Rank2SVD { rank2 }, Self::Rank1 { rank1 }) => Self::Rank1 {
-                rank1: rank2 * rank1,
-            },
-            (Self::Pauli { pauli }, Self::Rank1 { rank1 }) => Self::Rank1 {
-                rank1: pauli * rank1,
-            },
-            (Self::Rank2SVD { rank2 }, Self::Rank2SVD { rank2: rk2 }) => {
-                Self::Rank2SVD { rank2: rank2 * rk2 }
-            }
-            (Self::Rank2SVD { rank2 }, Self::Pauli { pauli }) => Self::Rank2SVD {
-                rank2: rank2 * pauli,
-            },
-            (Self::Pauli { pauli }, Self::Rank2SVD { rank2 }) => Self::Rank2SVD {
-                rank2: pauli * rank2,
-            },
-            (Self::Pauli { pauli }, Self::Pauli { pauli: p2 }) => Self::Pauli { pauli: pauli * p2 },
+        let [[a, b], [c, d]] = self.mat;
+        let [[e, f], [g, h]] = rhs.mat;
+
+        Self {
+            mat: [
+                [a * e + b * g, a * f + b * h],
+                [c * e + d * g, c * f + d * h],
+            ],
         }
     }
 }
 
-impl Mul<Rank2SVD> for Rank1 {
-    type Output = Rank1;
-    fn mul(self, rhs: Rank2SVD) -> Self::Output {
-        let rk1 = self.regularize();
-        let rk2 = rhs.regularize();
-        Rank1 {
-            scalar: ONE,
-            ket: rk1.ket,
-            bra: rk1.scalar
-                * (rk1.bra.inner(&rk2.u1) * rk2.v1 * rk2.sigma1
-                    + rk1.bra.inner(&rk2.u2) * rk2.v2 * rk2.sigma2),
-        }
-        .regularize()
+impl<T: FloatExt + Hash> MulAssign for RawMat<T> {
+    fn mul_assign(&mut self, rhs: Self) {
+        *self = *self * rhs;
     }
 }
-
-impl Mul<Rank1> for Rank2SVD {
-    type Output = Rank1;
-    fn mul(self, rhs: Rank1) -> Self::Output {
-        let rk1 = rhs.regularize();
-        let rk2 = self.regularize();
-        Rank1 {
-            scalar: ONE,
-            ket: (rk2.sigma1 * rk2.u1 * rk2.v1.inner(&rk1.ket)
-                + rk2.sigma2 * rk2.u2 * rk2.v2.inner(&rk1.ket))
-                * rk1.scalar,
-            bra: rk1.bra,
-        }
-        .regularize()
-    }
-}
-impl Mul<Rank1> for Pauli {
-    type Output = Rank1;
-    fn mul(self, rhs: Rank1) -> Self::Output {
-        Rank1 {
-            scalar: rhs.scalar.regularize(),
-            ket: self * rhs.ket,
-            bra: rhs.bra,
-        }
-        .regularize()
-    }
-}
-
-impl Mul<Pauli> for Rank1 {
-    type Output = Rank1;
-    fn mul(self, rhs: Pauli) -> Self::Output {
-        Rank1 {
-            scalar: self.scalar.regularize(),
-            ket: self.ket,
-            bra: self.bra * rhs,
-        }
-        .regularize()
-    }
-}
-
-impl Mul<Rank2SVD> for Pauli {
-    type Output = Rank2SVD;
-    fn mul(self, rhs: Rank2SVD) -> Self::Output {
-        Rank2SVD {
-            sigma1: rhs.sigma1.regularize(),
-            sigma2: rhs.sigma2.regularize(),
-            u1: self * rhs.u1,
-            u2: self * rhs.u2,
-            v1: rhs.v1,
-            v2: rhs.v2,
-        }
-        .regularize()
-    }
-}
-
-impl Mul<Pauli> for Rank2SVD {
-    type Output = Rank2SVD;
-    fn mul(self, rhs: Pauli) -> Self::Output {
-        Rank2SVD {
-            sigma1: self.sigma1.regularize(),
-            sigma2: self.sigma2.regularize(),
-            u1: self.u1,
-            u2: self.u2,
-            v1: self.v1 * rhs,
-            v2: self.v2 * rhs,
-        }
-        .regularize()
-    }
-}
-
-#[cfg(test)]
-mod state_tests {
-    use super::*;
-
-    #[test]
-    fn test_ket_creation() {
-        let ket = State::Ket {
-            c0: Cpx::Real { re: 1.0 },
-            c1: Cpx::Real { re: 2.0 },
-            phase: Cpx::Real { re: 1.0 },
-        };
-
-        match ket {
-            State::Ket { c0, c1, phase } => {
-                match c0 {
-                    Cpx::Real { re } => assert_eq!(re, 1.0),
-                    _ => panic!("Incorrect value for c0 in Ket."),
-                }
-                match c1 {
-                    Cpx::Real { re } => assert_eq!(re, 2.0),
-                    _ => panic!("Incorrect value for c1 in Ket."),
-                }
-                match phase {
-                    Cpx::Real { re } => assert_eq!(re, 1.0),
-                    _ => panic!("Incorrect phase value in Ket."),
-                }
+impl<T: FloatExt + Hash> Mul<T> for RawMat<T> {
+    type Output = Self;
+    fn mul(self, rhs: T) -> Self::Output {
+        let mut mat = self.mat;
+        for row in mat.iter_mut() {
+            for elem in row.iter_mut() {
+                *elem *= rhs;
             }
-            _ => panic!("Failed to create Ket state."),
         }
+        Self { mat }
     }
+}
 
-    #[test]
-    fn test_bra_creation() {
-        let bra = State::Bra {
-            c0: Cpx::Real { re: 3.0 },
-            c1: Cpx::Real { re: 4.0 },
-            phase: Cpx::Real { re: 1.0 },
-        };
+impl<T: FloatExt + Hash> MulAssign<T> for RawMat<T> {
+    fn mul_assign(&mut self, rhs: T) {
+        *self = *self * rhs;
+    }
+}
 
-        match bra {
-            State::Bra { c0, c1, phase } => {
-                match c0 {
-                    Cpx::Real { re } => assert_eq!(re, 3.0),
-                    _ => panic!("Incorrect value for c0 in Bra."),
-                }
-                match c1 {
-                    Cpx::Real { re } => assert_eq!(re, 4.0),
-                    _ => panic!("Incorrect value for c1 in Bra."),
-                }
-                match phase {
-                    Cpx::Real { re } => assert_eq!(re, 1.0),
-                    _ => panic!("Incorrect phase value in Bra."),
-                }
+impl<T: FloatExt + Hash> Mul<Cpx<T>> for RawMat<T> {
+    type Output = Self;
+    fn mul(self, rhs: Cpx<T>) -> Self::Output {
+        let mut mat = self.mat;
+        for row in mat.iter_mut() {
+            for elem in row.iter_mut() {
+                *elem *= rhs;
             }
-            _ => panic!("Failed to create Bra state."),
         }
+        Self { mat }
     }
+}
 
-    #[test]
-    fn test_bra_ket_inner_product() {
-        let ket = State::Ket {
-            c0: Cpx::Real { re: 1.0 },
-            c1: Cpx::Real { re: 2.0 },
-            phase: Cpx::Real { re: 1.0 },
-        };
-        let bra = State::Bra {
-            c0: Cpx::Real { re: 3.0 },
-            c1: Cpx::Real { re: 4.0 },
-            phase: Cpx::Real { re: 1.0 },
-        };
+impl<T: FloatExt + Hash> MulAssign<Cpx<T>> for RawMat<T> {
+    fn mul_assign(&mut self, rhs: Cpx<T>) {
+        *self = *self * rhs;
+    }
+}
 
-        let result = bra.inner(&ket);
-
-        match result {
-            Cpx::Real { re } => assert_eq!(re, 11.0), // Inner product should be 1*3 + 2*4
-            _ => panic!("Inner product failed."),
+impl<T: FloatExt + Hash> Add for CpxQuaternion<T> {
+    type Output = Self;
+    fn add(self, other: Self) -> Self {
+        let mut coefficients = self.coefficients;
+        for (i, elem) in coefficients.iter_mut().enumerate() {
+            *elem += other.coefficients[i];
         }
+        Self { coefficients }
     }
+}
 
-    #[test]
-    fn test_ket_negation() {
-        let ket = State::Ket {
-            c0: Cpx::Real { re: 3.0 },
-            c1: Cpx::Real { re: 4.0 },
-            phase: Cpx::Real { re: 1.0 },
-        };
-
-        // Applying regularization to the state
-        let regularized_ket = ket.regularize();
-        let result = -regularized_ket; // Negate the regularized state
-
-        match result {
-            State::Ket { c0, c1, phase } => {
-                // Check if the normalization of c0, c1 is correct
-                match c0 {
-                    Cpx::Real { re } => assert_eq!(re, 0.6), // Expecting normalized value
-                    _ => panic!("Negation failed for c0 in Ket."),
-                }
-                match c1 {
-                    Cpx::Real { re } => assert_eq!(re, 0.8), // Expecting normalized value
-                    _ => panic!("Negation failed for c1 in Ket."),
-                }
-                match phase {
-                    Cpx::Real { re } => assert_eq!(re, -5.0), // Sign unchanged after negation
-                    _ => panic!("Negation failed for phase in Ket."),
-                }
-            }
-            _ => panic!("Failed to negate Ket state."),
-        }
-    }
-
-    #[test]
-    fn test_bra_negation() {
-        let bra = State::Bra {
-            c0: Cpx::Real { re: 3.0 },
-            c1: Cpx::Real { re: 4.0 },
-            phase: Cpx::Real { re: 1.0 },
-        };
-        let regularized_bra = bra.regularize();
-        let result = -regularized_bra; // Negate the regularized state
-
-        match result {
-            State::Bra { c0, c1, phase } => {
-                match c0 {
-                    Cpx::Real { re } => assert_eq!(re, 0.6),
-                    _ => panic!("Negation failed for c0 in Bra."),
-                }
-                match c1 {
-                    Cpx::Real { re } => assert_eq!(re, 0.8),
-                    _ => panic!("Negation failed for c1 in Bra."),
-                }
-                match phase {
-                    Cpx::Real { re } => assert_eq!(re, -5.0),
-                    _ => panic!("Negation failed for phase in Bra."),
-                }
-            }
-            _ => panic!("Failed to negate Bra state."),
-        }
-    }
-
-    #[test]
-    fn test_ket_addition() {
-        let ket1 = State::Ket {
-            c0: Cpx::Real { re: 1.0 },
-            c1: Cpx::Real { re: 2.0 },
-            phase: Cpx::Real { re: 1.0 },
-        };
-        let ket2 = State::Ket {
-            c0: Cpx::Real { re: 2.0 },
-            c1: Cpx::Real { re: 2.0 },
-            phase: Cpx::Real { re: 1.0 },
-        };
-
-        let result = ket1 + ket2;
-
-        match result {
-            State::Ket { c0, c1, phase } => {
-                match c0 {
-                    Cpx::Real { re } => assert_eq!(re, 0.6),
-                    _ => panic!("Addition failed for c0 in Ket."),
-                }
-                match c1 {
-                    Cpx::Real { re } => assert_eq!(re, 0.8),
-                    _ => panic!("Addition failed for c1 in Ket."),
-                }
-                match phase {
-                    Cpx::Real { re } => assert_eq!(re, 5.0),
-                    _ => panic!("Addition failed for phase in Ket."),
-                }
-            }
-            _ => panic!("Failed to add Ket states."),
-        }
-    }
-
-    #[test]
-    fn test_bra_ket_inner_product_zero() {
-        let ket = State::Ket {
-            c0: Cpx::Real { re: 1.0 },
-            c1: Cpx::Real { re: 0.0 },
-            phase: Cpx::Real { re: 1.0 },
-        };
-        let bra = State::Bra {
-            c0: Cpx::Real { re: 0.0 },
-            c1: Cpx::Real { re: 1.0 },
-            phase: Cpx::Real { re: 1.0 },
-        };
-
-        let result = bra.inner(&ket);
-
-        match result {
-            Cpx::Zero {} => {} // The inner product should be 0
-            _ => panic!("Inner product failed, expected 0."),
-        }
-    }
-
-    #[test]
-    fn test_state_normalization() {
-        let ket = State::Ket {
-            c0: Cpx::Real { re: 3.0 },
-            c1: Cpx::Real { re: -4.0 },
-            phase: Cpx::Real { re: 1.0 },
-        };
-
-        let normalized_ket = ket.normalize();
-
-        match normalized_ket {
-            State::Ket { c0, c1, phase } => {
-                match c0 {
-                    Cpx::Real { re } => assert_eq!(re, 0.6),
-                    _ => panic!("Normalization failed for c0 in Ket."),
-                }
-                match c1 {
-                    Cpx::Real { re } => assert_eq!(re, -0.8),
-                    _ => panic!("Normalization failed for c1 in Ket."),
-                }
-                match phase {
-                    Cpx::One {} => {}
-                    _ => panic!("Normalization failed for phase in Ket."),
-                }
-            }
-            _ => panic!("Failed to normalize Ket state."),
+impl<T: FloatExt + Hash> AddAssign for CpxQuaternion<T> {
+    fn add_assign(&mut self, other: Self) {
+        let mut coefficients = self.coefficients;
+        for (i, elem) in coefficients.iter_mut().enumerate() {
+            *elem += other.coefficients[i];
         }
     }
 }
 
-#[test]
-fn test_rank1_creation() {
-    let scalar = ONE;
-    let ket = State::Ket {
-        c0: ONE,
-        c1: ZERO,
-        phase: ONE,
-    };
-    let bra = ket.dag(); // Assuming dag() gives the conjugate transpose
-
-    let rank1 = Rank1 { scalar, ket, bra };
-    assert_eq!(rank1.scalar, ONE);
-    assert_eq!(rank1.ket, ket);
-    assert_eq!(rank1.bra, bra);
-    println!("{:?}", rank1);
-}
-
-#[test]
-fn test_rank1_clone_and_copy() {
-    let rank1 = Rank1 {
-        scalar: Cpx::Real { re: 2.0 },
-        ket: State::Ket {
-            c0: Cpx::J {},
-            c1: Cpx::NegJ {},
-            phase: Cpx::One {},
-        },
-        bra: State::Bra {
-            c0: Cpx::J {},
-            c1: Cpx::NegJ {},
-            phase: Cpx::One {},
-        },
-    };
-
-    let rank1_clone = rank1.clone();
-    let rank1_copy = rank1; // Should work because of Copy trait
-
-    assert_eq!(rank1, rank1_clone);
-    assert_eq!(rank1, rank1_copy);
-}
-
-#[test]
-fn test_rank1_arithmetic() {
-    let r1 = Rank1 {
-        scalar: Cpx::Real { re: 3.0 },
-        ket: State::Ket {
-            c0: Cpx::Real { re: 1.0 },
-            c1: Cpx::Real { re: 2.0 },
-            phase: Cpx::One {},
-        },
-        bra: State::Bra {
-            c0: Cpx::Real { re: 1.0 },
-            c1: Cpx::Real { re: -2.0 },
-            phase: Cpx::One {},
-        },
-    };
-
-    let r2 = Rank1 {
-        scalar: Cpx::Real { re: -1.0 },
-        ket: State::Ket {
-            c0: Cpx::J {},
-            c1: Cpx::NegJ {},
-            phase: Cpx::One {},
-        },
-        bra: State::Bra {
-            c0: Cpx::J {},
-            c1: Cpx::NegJ {},
-            phase: Cpx::One {},
-        },
-    };
-
-    let product = r1 * r2;
-
-    println!("Product: {:?}", product);
-}
-
-#[test]
-fn test_rank1_mul_state() {
-    let scalar = Cpx::One {};
-    let ket = State::Ket {
-        c0: Cpx::One {},
-        c1: Cpx::Zero {},
-        phase: Cpx::One {},
-    };
-    let bra = State::Bra {
-        c0: Cpx::One {},
-        c1: Cpx::Zero {},
-        phase: Cpx::One {},
-    };
-    let rank1 = Rank1 { scalar, ket, bra };
-
-    let test_state = State::Ket {
-        c0: Cpx::Real { re: 0.6 },
-        c1: Cpx::Real { re: 0.8 },
-        phase: Cpx::One {},
-    };
-
-    let result = rank1 * test_state; // Assuming you've implemented Mul for Rank1 * State
-
-    let expected = State::Ket {
-        c0: Cpx::One {},
-        c1: Cpx::Zero {},
-        phase: Cpx::Real { re: 0.6 },
-    };
-
-    assert_eq!(result, expected);
-    println!("{:?}", result); // Debug output to verify correctness
-}
-#[test]
-fn test_rank1_mul_cpx() {
-    let scalar = Cpx::One {};
-    let ket = State::Ket {
-        c0: Cpx::One {},
-        c1: Cpx::Zero {},
-        phase: Cpx::One {},
-    };
-    let bra = State::Bra {
-        c0: Cpx::One {},
-        c1: Cpx::Zero {},
-        phase: Cpx::One {},
-    };
-    let rank1 = Rank1 { scalar, ket, bra };
-
-    let multiplier = Cpx::Real { re: 2.0 };
-    let result = rank1 * multiplier; // Assuming Mul<Cpx> is implemented for Rank1
-
-    let expected = Rank1 {
-        scalar: Cpx::Real { re: 2.0 },
-        ket,
-        bra,
-    };
-
-    assert_eq!(result, expected);
-    println!("{:?}", result); // Debug output to verify correctness
-}
-
-#[test]
-fn test_rank2svd_mul_state() {
-    let rank2 = Rank2SVD {
-        sigma1: Cpx::Real { re: 2.0 },
-        sigma2: Cpx::Real { re: 1.0 },
-        u1: State::Ket {
-            c0: Cpx::One {},
-            c1: Cpx::Zero {},
-            phase: Cpx::One {},
-        },
-        u2: State::Ket {
-            c0: Cpx::Zero {},
-            c1: Cpx::One {},
-            phase: Cpx::One {},
-        },
-        v1: State::Bra {
-            c0: Cpx::One {},
-            c1: Cpx::Zero {},
-            phase: Cpx::One {},
-        },
-        v2: State::Bra {
-            c0: Cpx::Zero {},
-            c1: Cpx::One {},
-            phase: Cpx::One {},
-        },
-    };
-
-    let state = State::Ket {
-        c0: Cpx::One {},
-        c1: Cpx::Zero {},
-        phase: Cpx::One {},
-    };
-    let result = rank2 * state;
-
-    let expected = State::Ket {
-        c0: ONE,
-        c1: Cpx::Zero {},
-        phase: Cpx::Real { re: 2.0 },
-    };
-    assert_eq!(result, expected);
-    println!("{:?}", result);
-}
-
-#[test]
-fn test_rank2svd_mul_rank1() {
-    let rank2 = Rank2SVD {
-        sigma1: Cpx::Real { re: 2.0 },
-        sigma2: Cpx::Real { re: 1.0 },
-        u1: State::Ket {
-            c0: Cpx::One {},
-            c1: Cpx::Zero {},
-            phase: Cpx::One {},
-        },
-        u2: State::Ket {
-            c0: Cpx::Zero {},
-            c1: Cpx::One {},
-            phase: Cpx::One {},
-        },
-        v1: State::Bra {
-            c0: Cpx::One {},
-            c1: Cpx::Zero {},
-            phase: Cpx::One {},
-        },
-        v2: State::Bra {
-            c0: Cpx::Zero {},
-            c1: Cpx::One {},
-            phase: Cpx::One {},
-        },
-    };
-
-    let rank1 = Rank1 {
-        scalar: Cpx::Real { re: 3.0 },
-        ket: State::Ket {
-            c0: Cpx::One {},
-            c1: Cpx::Zero {},
-            phase: Cpx::One {},
-        },
-        bra: State::Bra {
-            c0: Cpx::One {},
-            c1: Cpx::Zero {},
-            phase: Cpx::One {},
-        },
-    };
-
-    let result = rank2 * rank1;
-
-    let expected = Rank1 {
-        scalar: Cpx::Real { re: 6.0 }, // 2.0 * 3.0
-        ket: State::Ket {
-            c0: Cpx::One {},
-            c1: Cpx::Zero {},
-            phase: Cpx::One {},
-        },
-        bra: State::Bra {
-            c0: Cpx::One {},
-            c1: Cpx::Zero {},
-            phase: Cpx::One {},
-        },
-    };
-
-    assert_eq!(result, expected);
-    println!("{:?}", result);
-}
-
-#[test]
-fn test_rank2svd_mul_rank2svd() {
-    let rank2_a = Rank2SVD {
-        sigma1: Cpx::Real { re: 2.0 },
-        sigma2: Cpx::Real { re: 1.0 },
-        u1: State::Ket {
-            c0: Cpx::One {},
-            c1: Cpx::Zero {},
-            phase: Cpx::One {},
-        },
-        u2: State::Ket {
-            c0: Cpx::Zero {},
-            c1: Cpx::One {},
-            phase: Cpx::One {},
-        },
-        v1: State::Bra {
-            c0: Cpx::One {},
-            c1: Cpx::Zero {},
-            phase: Cpx::One {},
-        },
-        v2: State::Bra {
-            c0: Cpx::Zero {},
-            c1: Cpx::One {},
-            phase: Cpx::One {},
-        },
-    };
-
-    let rank2_b = Rank2SVD {
-        sigma1: Cpx::Real { re: 3.0 },
-        sigma2: Cpx::Real { re: 4.0 },
-        u1: State::Ket {
-            c0: Cpx::One {},
-            c1: Cpx::Zero {},
-            phase: Cpx::One {},
-        },
-        u2: State::Ket {
-            c0: Cpx::Zero {},
-            c1: Cpx::One {},
-            phase: Cpx::One {},
-        },
-        v1: State::Bra {
-            c0: Cpx::One {},
-            c1: Cpx::Zero {},
-            phase: Cpx::One {},
-        },
-        v2: State::Bra {
-            c0: Cpx::Zero {},
-            c1: Cpx::One {},
-            phase: Cpx::One {},
-        },
-    };
-
-    let result = rank2_a * rank2_b;
-
-    let expected = Rank2SVD {
-        sigma1: Cpx::Real { re: 6.0 }, // 2.0 * 3.0
-        sigma2: Cpx::Real { re: 4.0 }, // 1.0 * 4.0
-        u1: State::Ket {
-            c0: Cpx::One {},
-            c1: Cpx::Zero {},
-            phase: Cpx::One {},
-        },
-        u2: State::Ket {
-            c0: Cpx::Zero {},
-            c1: Cpx::One {},
-            phase: Cpx::One {},
-        },
-        v1: State::Bra {
-            c0: Cpx::One {},
-            c1: Cpx::Zero {},
-            phase: Cpx::One {},
-        },
-        v2: State::Bra {
-            c0: Cpx::Zero {},
-            c1: Cpx::One {},
-            phase: Cpx::One {},
-        },
-    };
-
-    assert_eq!(result, expected);
-    println!("{:?}", result);
-}
-
-#[test]
-fn test_rank2svd_mul_cpx() {
-    let rank2 = Rank2SVD {
-        sigma1: Cpx::Real { re: 2.0 },
-        sigma2: Cpx::Real { re: 1.0 },
-        u1: State::Ket {
-            c0: Cpx::One {},
-            c1: Cpx::Zero {},
-            phase: Cpx::One {},
-        },
-        u2: State::Ket {
-            c0: Cpx::Zero {},
-            c1: Cpx::One {},
-            phase: Cpx::One {},
-        },
-        v1: State::Bra {
-            c0: Cpx::One {},
-            c1: Cpx::Zero {},
-            phase: Cpx::One {},
-        },
-        v2: State::Bra {
-            c0: Cpx::Zero {},
-            c1: Cpx::One {},
-            phase: Cpx::One {},
-        },
-    };
-
-    let multiplier = Cpx::Real { re: 3.0 };
-    let result = rank2 * multiplier;
-
-    let expected = Rank2SVD {
-        sigma1: Cpx::Real { re: 6.0 },
-        sigma2: Cpx::Real { re: 3.0 },
-        u1: rank2.u1,
-        u2: rank2.u2,
-        v1: rank2.v1,
-        v2: rank2.v2,
-    };
-
-    assert_eq!(result, expected);
-    println!("{:?}", result);
-}
-
-#[test]
-fn test_pauli_creation() {
-    let pauli_x = Pauli {
-        idx: 1,
-        scalar: Cpx::One {},
-    };
-    let pauli_y = Pauli {
-        idx: 2,
-        scalar: Cpx::Real { re: -1.0 },
-    };
-    let pauli_z = Pauli {
-        idx: 3,
-        scalar: Cpx::Imag { im: 1.0 },
-    };
-
-    assert_eq!(pauli_x.idx, 1);
-    assert_eq!(pauli_y.idx, 2);
-    assert_eq!(pauli_z.idx, 3);
-
-    println!("{:?}", pauli_x);
-    println!("{:?}", pauli_y);
-    println!("{:?}", pauli_z);
-}
-
-#[test]
-fn test_pauli_mul_pauli() {
-    let pauli_x = Pauli {
-        idx: 1,
-        scalar: Cpx::One {},
-    };
-    let pauli_y = Pauli {
-        idx: 2,
-        scalar: Cpx::One {},
-    };
-    let pauli_z = Pauli {
-        idx: 3,
-        scalar: Cpx::One {},
-    };
-    let identity = Pauli {
-        idx: 0,
-        scalar: Cpx::One {},
-    };
-
-    // X * X = I
-    assert_eq!(pauli_x * pauli_x, identity);
-    // Y * Y = I
-    assert_eq!(pauli_y * pauli_y, identity);
-    // Z * Z = I
-    assert_eq!(pauli_z * pauli_z, identity);
-    // X * Y = iZ
-    assert_eq!(
-        pauli_x * pauli_y,
-        Pauli {
-            idx: 3,
-            scalar: Cpx::Imag { im: 1.0 }
+impl<T: FloatExt + Hash> Neg for CpxQuaternion<T> {
+    type Output = Self;
+    fn neg(self) -> Self::Output {
+        let mut coefficients = self.coefficients;
+        for elem in coefficients.iter_mut() {
+            *elem = -*elem;
         }
-    );
-    // Y * X = -iZ
-    assert_eq!(
-        pauli_y * pauli_x,
-        Pauli {
-            idx: 3,
-            scalar: Cpx::Imag { im: -1.0 }
+        Self { coefficients }
+    }
+}
+
+impl<T: FloatExt + Hash> Sub for CpxQuaternion<T> {
+    type Output = Self;
+    fn sub(self, other: Self) -> Self {
+        self + (-other)
+    }
+}
+
+impl<T: FloatExt + Hash> SubAssign for CpxQuaternion<T> {
+    fn sub_assign(&mut self, other: Self) {
+        *self += -other;
+    }
+}
+
+impl<T: FloatExt + Hash> Mul for CpxQuaternion<T> {
+    type Output = Self;
+    fn mul(self, rhs: Self) -> Self {
+        let mat_lhs = RawMat::from_cpx_quaternion(self);
+        let mat_rhs = RawMat::from_cpx_quaternion(rhs);
+        let mat_new = mat_lhs * mat_rhs;
+        Self::from_raw_mat(mat_new)
+    }
+}
+
+impl<T: FloatExt + Hash> MulAssign for CpxQuaternion<T> {
+    fn mul_assign(&mut self, rhs: Self) {
+        *self = *self * rhs;
+    }
+}
+
+impl<T: FloatExt + Hash> Mul<T> for CpxQuaternion<T> {
+    type Output = Self;
+    fn mul(self, rhs: T) -> Self::Output {
+        let mut coefficients = self.coefficients;
+        for elem in coefficients.iter_mut() {
+            *elem *= rhs;
         }
-    );
-
-    println!("{:?}", pauli_x * pauli_y);
-    println!("{:?}", pauli_y * pauli_x);
+        Self { coefficients }
+    }
 }
 
-#[test]
-fn test_pauli_mul_cpx() {
-    let pauli_x = Pauli {
-        idx: 1,
-        scalar: Cpx::One {},
-    };
-    let multiplier = Cpx::Real { re: 2.0 };
-
-    let result = pauli_x * multiplier;
-    let expected = Pauli {
-        idx: 1,
-        scalar: Cpx::Real { re: 2.0 },
-    };
-
-    assert_eq!(result, expected);
-    println!("{:?}", result);
+impl<T: FloatExt + Hash> MulAssign<T> for CpxQuaternion<T> {
+    fn mul_assign(&mut self, rhs: T) {
+        *self = *self * rhs;
+    }
 }
 
-#[test]
-fn test_pauli_identity() {
-    let identity = Pauli {
-        idx: 0,
-        scalar: Cpx::One {},
-    };
-    let pauli_x = Pauli {
-        idx: 1,
-        scalar: Cpx::One {},
-    };
-
-    assert_eq!(identity * pauli_x, pauli_x);
-    assert_eq!(pauli_x * identity, pauli_x);
-
-    println!("{:?}", identity * pauli_x);
-    println!("{:?}", pauli_x * identity);
+impl<T: FloatExt + Hash> Mul<Cpx<T>> for CpxQuaternion<T> {
+    type Output = Self;
+    fn mul(self, rhs: Cpx<T>) -> Self::Output {
+        let mut coefficients = self.coefficients;
+        for elem in coefficients.iter_mut() {
+            *elem *= rhs;
+        }
+        Self { coefficients }
+    }
 }
 
-#[test]
-fn test_pauli_negation() {
-    let pauli_x = Pauli {
-        idx: 1,
-        scalar: Cpx::One {},
-    };
-    let neg_pauli_x = -pauli_x;
-
-    let expected = Pauli {
-        idx: 1,
-        scalar: Cpx::NegOne {},
-    };
-    assert_eq!(neg_pauli_x, expected);
-
-    println!("{:?}", neg_pauli_x);
-}
-
-#[test]
-fn test_pauli_mul_state() {
-    // Define a Pauli matrix (X, Y, Z)
-    let pauli_x = Pauli {
-        idx: 1,
-        scalar: ONE,
-    };
-    let pauli_y = Pauli {
-        idx: 2,
-        scalar: ONE,
-    };
-    let pauli_z = Pauli {
-        idx: 3,
-        scalar: ONE,
-    };
-
-    // Define a state (Ket and Bra)
-    let ket = State::Ket {
-        c0: ONE,
-        c1: ZERO,
-        phase: ONE,
-    };
-    let bra = State::Bra {
-        c0: ONE,
-        c1: ZERO,
-        phase: ONE,
-    };
-
-    // Pauli X on Ket
-    let result_ket_x = pauli_x * ket;
-    let expected_ket_x = State::Ket {
-        c0: ZERO,
-        c1: ONE,
-        phase: ONE,
-    };
-    assert_eq!(result_ket_x, expected_ket_x);
-
-    // Pauli X on Bra
-    let result_bra_x = bra * pauli_x;
-    let expected_bra_x = State::Bra {
-        c0: ZERO,
-        c1: ONE,
-        phase: ONE,
-    };
-    assert_eq!(result_bra_x, expected_bra_x);
-
-    // Pauli Y on Ket
-    let result_ket_y = pauli_y * ket;
-    let expected_ket_y = State::Ket {
-        c0: ZERO,
-        c1: ONE,
-        phase: Cpx::Imag { im: 1.0 },
-    };
-    assert_eq!(result_ket_y, expected_ket_y);
-
-    // Pauli Z on Ket
-    let result_ket_z = pauli_z * ket;
-    let expected_ket_z = State::Ket {
-        c0: ONE,
-        c1: ZERO,
-        phase: ONE,
-    };
-    assert_eq!(result_ket_z, expected_ket_z);
-
-    println!("{:?}", result_ket_x);
-    println!("{:?}", result_bra_x);
-    println!("{:?}", result_ket_y);
-    println!("{:?}", result_ket_z);
+impl<T: FloatExt + Hash> MulAssign<Cpx<T>> for CpxQuaternion<T> {
+    fn mul_assign(&mut self, rhs: Cpx<T>) {
+        *self = *self * rhs;
+    }
 }
